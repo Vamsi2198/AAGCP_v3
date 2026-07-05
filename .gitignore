@@ -1,0 +1,14 @@
+# NEVER deploy local environments — this is what broke the previous deploy
+.conda/
+myenv/
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+.vscode/
+.idea/
+*.log
+.env

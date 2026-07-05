@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: aagcp-vector-pro
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      # Optional: set this to use OpenAI API embeddings (no torch, low memory)
+      # - key: OPENAI_API_KEY
+      #   sync: false

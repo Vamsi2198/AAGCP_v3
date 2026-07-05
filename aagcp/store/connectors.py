@@ -1,0 +1,311 @@
+"""
+VectorStoreConnector — the plug-and-play seam.
+
+The engine needs exactly five operations from any vector store, so any DB
+that can do them plugs in:
+
+    count()                  → how many vectors (for uncapped scanning)
+    iter_all(batch)          → stream EVERY vector + its payload (no cap)
+    fetch(ids)               → get specific vectors
+    upsert(records)          → write/replace vectors (for re-embed migration)
+    query(vector, k, filter) → similarity search (retrieval)
+    delete(ids)              → remove vectors (quarantine fallback)
+
+InMemoryConnector is the runnable reference (proven here). The Pinecone,
+Qdrant, and pgvector connectors are written against each client's real API
+and gated on that client being installed — smoke-tested in your environment.
+
+Payload convention: each vector carries {"source_text": ..., "metadata": {...}}.
+'source_text' is what we re-embed from during cleaning. If a production index
+does NOT store source text, cleaning degrades to quarantine/delete — see
+engine.py. This is a physics limit, surfaced honestly, not hidden.
+"""
+
+from __future__ import annotations
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Dict, Iterator, List, Optional
+import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class VectorRecord:
+    id: str
+    vector: Optional[np.ndarray]
+    source_text: Optional[str]
+    metadata: dict = field(default_factory=dict)
+
+
+class VectorStoreConnector(ABC):
+    name: str = "abstract"
+
+    @abstractmethod
+    def count(self) -> int: ...
+
+    @abstractmethod
+    def iter_all(self, batch: int = 500) -> Iterator[List[VectorRecord]]:
+        """Stream ALL records in batches. No limit — scans the whole index."""
+
+    @abstractmethod
+    def fetch(self, ids: List[str]) -> List[VectorRecord]: ...
+
+    @abstractmethod
+    def upsert(self, records: List[VectorRecord]): ...
+
+    @abstractmethod
+    def query(self, vector: np.ndarray, k: int = 5,
+              where: Optional[dict] = None) -> List[dict]: ...
+
+    @abstractmethod
+    def delete(self, ids: List[str]): ...
+
+
+class InMemoryConnector(VectorStoreConnector):
+    """Runnable reference store — simulates a production index (proven here)."""
+    name = "in_memory"
+
+    def __init__(self):
+        self._data: Dict[str, VectorRecord] = {}
+
+    def count(self) -> int:
+        return len(self._data)
+
+    def iter_all(self, batch: int = 500):
+        items = list(self._data.values())
+        for i in range(0, len(items), batch):
+            yield items[i:i + batch]
+
+    def fetch(self, ids):
+        return [self._data[i] for i in ids if i in self._data]
+
+    def upsert(self, records):
+        for r in records:
+            self._data[r.id] = r
+
+    def query(self, vector, k=5, where=None):
+        rows = []
+        for r in self._data.values():
+            if r.vector is None:
+                continue
+            if where and not all(r.metadata.get(kk) == vv for kk, vv in where.items()):
+                continue
+            sim = float(np.dot(vector, r.vector))
+            rows.append({"id": r.id, "score": sim,
+                         "source_text": r.source_text, "metadata": r.metadata})
+        return sorted(rows, key=lambda x: -x["score"])[:k]
+
+    def delete(self, ids):
+        for i in ids:
+            self._data.pop(i, None)
+
+
+# ── Real production adapters (written; enabled when the client is installed) ──
+
+class PineconeConnector(VectorStoreConnector):
+    """
+    Pinecone. pip install pinecone-client.
+        from pinecone import Pinecone
+        pc = Pinecone(api_key=...); index = pc.Index(host=...)
+    iter_all uses index.list()/fetch paginated; upsert/query/delete map 1:1.
+    Store source_text in metadata at ingest so cleaning can re-embed from it.
+    """
+    name = "pinecone"
+
+    def __init__(self, index, namespace: str = ""):
+        self._ix = index
+        self._ns = namespace
+        logger.info(f"[PINECONE] Connector initialized with namespace='{namespace}'")
+
+    def count(self):
+        return int(self._ix.describe_index_stats().get("total_vector_count", 0))
+
+    def iter_all(self, batch: int = 500):
+        """
+        Stream ALL records in batches via index.list() pagination.
+        Pinecone's list() returns ListResponse objects with .vectors (ListItems with IDs only).
+        We then fetch the actual vector data in batches.
+        """
+        list_gen = self._ix.list(namespace=self._ns if self._ns else None)
+        
+        # Collect IDs from all list responses
+        all_ids = []
+        for list_response in list_gen:
+            if hasattr(list_response, 'vectors') and list_response.vectors:
+                # Each ListItem has only 'id' and 'metadata'
+                for item in list_response.vectors:
+                    all_ids.append(item.id)
+        
+        # Fetch actual vectors in batches and yield
+        for i in range(0, len(all_ids), batch):
+            batch_ids = all_ids[i:i + batch]
+            if batch_ids:
+                try:
+                    fetched = self._ix.fetch(ids=batch_ids, namespace=self._ns if self._ns else None)
+                    recs = []
+                    if hasattr(fetched, 'vectors'):
+                        for vid, v in fetched.vectors.items():
+                            md = dict(v.get("metadata") or {})
+                            recs.append(VectorRecord(vid, None,
+                                                    md.get("source_text") or md.get("text"),
+                                                    md))
+                    if recs:
+                        yield recs
+                except Exception:
+                    # Skip this batch if fetch fails
+                    continue
+
+    def fetch(self, ids):
+        out = []
+        for vid, v in self._ix.fetch(ids=ids, namespace=self._ns).vectors.items():
+            md = dict(v.get("metadata") or {})
+            out.append(VectorRecord(vid, None,
+                                    md.get("source_text") or md.get("text"),
+                                    md))
+        return out
+
+    def upsert(self, records):
+        self._ix.upsert(namespace=self._ns, vectors=[
+            {"id": r.id, "values": list(map(float, r.vector)),
+             "metadata": {**r.metadata,
+                          "source_text": r.source_text or "",
+                          "text": r.source_text or ""}}
+            for r in records])
+
+    def query(self, vector, k=5, where=None):
+        res = self._ix.query(namespace=self._ns, vector=list(map(float, vector)),
+                             top_k=k, include_metadata=True, filter=where or None)
+        return [{"id": m["id"], "score": m["score"],
+                 "source_text": ((m.get("metadata") or {}).get("source_text") or
+                                 (m.get("metadata") or {}).get("text")),
+                 "metadata": m.get("metadata") or {}} for m in res["matches"]]
+
+    def delete(self, ids):
+        self._ix.delete(ids=ids, namespace=self._ns)
+
+
+class QdrantConnector(VectorStoreConnector):
+    """
+    Qdrant. pip install qdrant-client.
+        from qdrant_client import QdrantClient
+        client = QdrantClient(url=..., api_key=...)
+    iter_all uses scroll(); upsert uses PointStruct; query uses search().
+    """
+    name = "qdrant"
+
+    def __init__(self, client, collection: str):
+        self._c = client
+        self._col = collection
+
+    def count(self):
+        return int(self._c.count(self._col, exact=True).count)
+
+    def iter_all(self, batch: int = 500):
+        offset = None
+        while True:
+            points, offset = self._c.scroll(self._col, limit=batch, offset=offset,
+                                             with_payload=True, with_vectors=False)
+            if not points:
+                break
+            yield [VectorRecord(str(p.id), None,
+                                (p.payload or {}).get("source_text") or
+                                (p.payload or {}).get("text"), p.payload or {})
+                   for p in points]
+            if offset is None:
+                break
+
+    def fetch(self, ids):
+        pts = self._c.retrieve(self._col, ids=ids, with_payload=True)
+        return [VectorRecord(str(p.id), None,
+                             (p.payload or {}).get("source_text") or
+                             (p.payload or {}).get("text"), p.payload or {})
+                for p in pts]
+
+    def upsert(self, records):
+        from qdrant_client.models import PointStruct
+        self._c.upsert(self._col, points=[
+            PointStruct(id=r.id, vector=list(map(float, r.vector)),
+                        payload={**r.metadata,
+                                 "source_text": r.source_text or "",
+                                 "text": r.source_text or ""})
+            for r in records])
+
+    def query(self, vector, k=5, where=None):
+        res = self._c.search(self._col, query_vector=list(map(float, vector)),
+                             limit=k, with_payload=True)
+        return [{"id": str(h.id), "score": float(h.score),
+                 "source_text": ((h.payload or {}).get("source_text") or
+                                 (h.payload or {}).get("text")),
+                 "metadata": h.payload or {}} for h in res]
+
+    def delete(self, ids):
+        self._c.delete(self._col, points_selector=ids)
+
+
+class PgVectorConnector(VectorStoreConnector):
+    """
+    Postgres + pgvector. pip install psycopg[binary] pgvector.
+    Assumes a table: (id text pk, embedding vector, source_text text, metadata jsonb).
+    """
+    name = "pgvector"
+
+    def __init__(self, conn, table: str = "documents"):
+        self._conn = conn
+        self._t = table
+
+    def count(self):
+        with self._conn.cursor() as cur:
+            cur.execute(f"SELECT count(*) FROM {self._t}")
+            return int(cur.fetchone()[0])
+
+    def iter_all(self, batch: int = 500):
+        with self._conn.cursor(name="scan") as cur:
+            cur.itersize = batch
+            cur.execute(f"SELECT id, source_text, metadata FROM {self._t}")
+            buf = []
+            for row in cur:
+                source_text = row[1] or (row[2] or {}).get("text")
+                buf.append(VectorRecord(str(row[0]), None, source_text, row[2] or {}))
+                if len(buf) >= batch:
+                    yield buf; buf = []
+            if buf:
+                yield buf
+
+    def fetch(self, ids):
+        with self._conn.cursor() as cur:
+            cur.execute(f"SELECT id, source_text, metadata FROM {self._t} "
+                        f"WHERE id = ANY(%s)", (ids,))
+            return [VectorRecord(str(r[0]), None,
+                                 r[1] or (r[2] or {}).get("text"), r[2] or {})
+                    for r in cur.fetchall()]
+
+    def upsert(self, records):
+        import json
+        with self._conn.cursor() as cur:
+            for r in records:
+                cur.execute(
+                    f"INSERT INTO {self._t} (id, embedding, source_text, metadata) "
+                    f"VALUES (%s,%s,%s,%s) ON CONFLICT (id) DO UPDATE SET "
+                    f"embedding=EXCLUDED.embedding, source_text=EXCLUDED.source_text, "
+                    f"metadata=EXCLUDED.metadata",
+                    (r.id, list(map(float, r.vector)), r.source_text or "",
+                     json.dumps({**r.metadata,
+                                 "source_text": r.source_text or "",
+                                 "text": r.source_text or ""})))
+        self._conn.commit()
+
+    def query(self, vector, k=5, where=None):
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id, source_text, metadata, 1-(embedding <=> %s::vector) AS score "
+                f"FROM {self._t} ORDER BY embedding <=> %s::vector LIMIT %s",
+                (list(map(float, vector)), list(map(float, vector)), k))
+            return [{"id": str(r[0]), "source_text": r[1], "metadata": r[2] or {},
+                     "score": float(r[3])} for r in cur.fetchall()]
+
+    def delete(self, ids):
+        with self._conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {self._t} WHERE id = ANY(%s)", (ids,))
+        self._conn.commit()

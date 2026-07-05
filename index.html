@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>AAGCP-Vector — Vector PII Governance</title>
+<style>
+  :root{
+    --bg:#0b0f16; --bg2:#0f1520; --panel:#131b28; --panel2:#0d141e;
+    --line:#22303f; --ink:#eef4fb; --dim:#93a4b6; --mute:#5f7085;
+    --safe:#2fe0a6; --safe2:#0e9f6e; --amber:#f4b740; --danger:#ff6b6b;
+    --accent:#5b8cff; --accent2:#3d6ce0;
+    --mono:ui-monospace,'SFMono-Regular','JetBrains Mono',Menlo,Consolas,monospace;
+    --sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:
+        radial-gradient(1200px 600px at 80% -10%, #14203033, transparent),
+        radial-gradient(900px 500px at -10% 10%, #1a2b4033, transparent), var(--bg);
+       color:var(--ink);font-family:var(--sans);-webkit-font-smoothing:antialiased;line-height:1.5}
+  .top{position:sticky;top:0;z-index:10;background:linear-gradient(180deg,#0b0f16,#0b0f16ee);
+       border-bottom:1px solid var(--line);padding:16px 20px}
+  .brand{display:flex;align-items:center;gap:12px}
+  .logo{width:34px;height:34px;border-radius:9px;flex:none;position:relative;
+        background:conic-gradient(from 210deg,var(--accent),var(--safe),var(--accent));
+        box-shadow:0 0 22px #5b8cff55}
+  .logo::after{content:"";position:absolute;inset:8px;border-radius:4px;background:var(--bg)}
+  .logo::before{content:"";position:absolute;inset:13px;border-radius:50%;background:var(--safe);
+        box-shadow:0 0 10px var(--safe)}
+  h1{margin:0;font-size:17px;letter-spacing:.2px;font-weight:680}
+  h1 .g{background:linear-gradient(90deg,var(--safe),var(--accent));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .tag{color:var(--dim);font-size:12px;margin-top:2px}
+  .wrap{max-width:1080px;margin:0 auto;padding:18px 16px 80px}
+  .grid{display:grid;grid-template-columns:1fr;gap:16px}
+  @media(min-width:900px){.grid{grid-template-columns:1.05fr .95fr}}
+  .card{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);
+        border-radius:14px;padding:16px 16px 18px;box-shadow:0 8px 30px #00000030}
+  .card h2{margin:0 0 3px;font-size:12px;text-transform:uppercase;letter-spacing:.14em;color:var(--dim);font-weight:600}
+  .card p.sub{margin:0 0 12px;color:var(--mute);font-size:12.5px}
+  .steps{display:flex;flex-wrap:wrap;gap:8px}
+  button{appearance:none;border:0;border-radius:10px;padding:11px 14px;font-size:13.5px;font-weight:600;
+         cursor:pointer;font-family:var(--sans);transition:transform .05s,filter .15s}
+  button:active{transform:translateY(1px)}
+  .b-accent{background:linear-gradient(180deg,var(--accent),var(--accent2));color:#06101f}
+  .b-safe{background:linear-gradient(180deg,var(--safe),var(--safe2));color:#04140e}
+  .b-amber{background:linear-gradient(180deg,#ffce5c,var(--amber));color:#241701}
+  .b-ghost{background:#182432;color:var(--ink);border:1px solid var(--line)}
+  .b-danger{background:linear-gradient(180deg,#ff8a8a,var(--danger));color:#2a0606}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .row>.grow{flex:1;min-width:150px}
+  input,select{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--ink);
+        border-radius:9px;padding:10px 11px;font-size:13.5px;font-family:var(--sans)}
+  label{display:block;font-size:11.5px;color:var(--dim);margin:10px 0 4px}
+  .stat{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:12px 0 4px}
+  .stat .k{background:var(--panel2);border:1px solid var(--line);border-radius:11px;padding:12px}
+  .stat .n{font-size:22px;font-weight:730;font-variant-numeric:tabular-nums}
+  .stat .l{font-size:10.5px;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin-top:2px}
+  .n.safe{color:var(--safe)} .n.amber{color:var(--amber)} .n.ink{color:var(--ink)}
+  .bars{margin-top:6px}
+  .bar{display:flex;align-items:center;gap:9px;margin:6px 0;font-size:12px}
+  .bar .lab{width:120px;color:var(--dim);font-family:var(--mono);font-size:11px;text-align:right;flex:none}
+  .bar .track{flex:1;height:10px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;overflow:hidden}
+  .bar .fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--safe))}
+  .bar .val{width:52px;font-family:var(--mono);font-size:11px;color:var(--ink);text-align:right;flex:none;font-variant-numeric:tabular-nums}
+  .verdict{display:flex;gap:9px;align-items:center;border:1px solid var(--line);border-radius:11px;
+           padding:11px 13px;font-size:13px;font-family:var(--mono);color:var(--dim);background:var(--panel2);margin-bottom:12px}
+  .verdict .dot{width:9px;height:9px;border-radius:50%;background:var(--mute);flex:none}
+  .verdict.ok{border-color:#155e46;color:var(--safe)} .verdict.ok .dot{background:var(--safe);box-shadow:0 0 9px var(--safe)}
+  .verdict.warn{border-color:#5c4415;color:var(--amber)} .verdict.warn .dot{background:var(--amber);box-shadow:0 0 9px var(--amber)}
+  pre{background:#060a10;border:1px solid var(--line);border-radius:11px;padding:12px;font-family:var(--mono);
+      font-size:11.5px;white-space:pre-wrap;word-break:break-word;margin:10px 0 0;max-height:340px;overflow:auto;color:#c9d6e4}
+  pre .tok{color:var(--safe)} pre .er{color:var(--amber);font-weight:600} pre .raw{color:var(--danger)}
+  .pill{display:inline-block;font-family:var(--mono);font-size:10.5px;padding:2px 7px;border-radius:6px;
+        border:1px solid var(--line);color:var(--dim);margin-left:7px}
+  .dl{display:inline-flex;align-items:center;gap:7px;text-decoration:none}
+  .foot{color:var(--mute);font-size:11.5px;margin-top:14px;text-align:center}
+</style>
+</head>
+<body>
+<div class="top">
+  <div class="brand">
+    <div class="logo"></div>
+    <div>
+      <h1>AAGCP-<span class="g">Vector</span> · Vector PII Governance</h1>
+      <div class="tag">Connect a production index → find the PII already in it → clean it in place → govern forward</div>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+  <div id="verdict" class="verdict"><span class="dot"></span><span id="vtext">Ready. Connect to begin.</span></div>
+
+  <div class="grid">
+    <!-- LEFT: pipeline -->
+    <div style="display:flex;flex-direction:column;gap:16px">
+      <div class="card">
+        <h2>1 · Connect &amp; Scan</h2>
+        <p class="sub">Connect to a (simulated) production index full of un-redacted PII, then scan it uncapped.</p>
+        <div class="row">
+          <div class="grow">
+            <label>Index size (vectors)</label>
+            <input id="size" type="number" value="120" min="10" max="2000"/>
+          </div>
+          <div style="align-self:flex-end;display:flex;gap:8px">
+            <button class="b-accent" onclick="connect()">Connect</button>
+            <button class="b-ghost" onclick="scan()">Scan</button>
+          </div>
+        </div>
+        <div class="stat">
+          <div class="k"><div id="s_total" class="n ink">—</div><div class="l">Vectors</div></div>
+          <div class="k"><div id="s_pii" class="n amber">—</div><div class="l">PII instances</div></div>
+          <div class="k"><div id="s_pct" class="n amber">—</div><div class="l">% with PII</div></div>
+        </div>
+        <div id="bars" class="bars"></div>
+      </div>
+
+      <div class="card">
+        <h2>2 · Clean in place</h2>
+        <p class="sub">Re-embed the poisoned subset through tokenization. Only affected vectors — no full re-embed.</p>
+        <button class="b-safe" onclick="clean()">Clean the index</button>
+        <div class="stat">
+          <div class="k"><div id="c_re" class="n safe">—</div><div class="l">Re-embedded</div></div>
+          <div class="k"><div id="c_q" class="n ink">—</div><div class="l">Quarantined</div></div>
+          <div class="k"><div id="c_after" class="n safe">—</div><div class="l">PII after</div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>4 · Audit report</h2>
+        <p class="sub">Regulator-ready branded PDF from the current scan.</p>
+        <a class="dl" href="/report.pdf" target="_blank">
+          <button class="b-ghost">⬇ Download PII Audit PDF</button>
+        </a>
+      </div>
+    </div>
+
+    <!-- RIGHT: govern -->
+    <div style="display:flex;flex-direction:column;gap:16px">
+      <div class="card">
+        <h2>3 · Query — role decides reveal <span class="pill">same vectors</span></h2>
+        <p class="sub">Before cleaning: raw PII leaks. After cleaning: role-gated rehydration.</p>
+        <div class="row">
+          <div class="grow">
+            <label>Role</label>
+            <select id="role">
+              <option>ANALYST_ROLE</option>
+              <option>COMPLIANCE_OFFICER</option>
+              <option>ADMIN</option>
+            </select>
+          </div>
+          <div style="align-self:flex-end"><button class="b-accent" onclick="query()">Run query</button></div>
+        </div>
+        <pre id="qout">Run a query to see results.</pre>
+      </div>
+
+      <div class="card">
+        <h2>Erase — GDPR / DPDP Art. 17</h2>
+        <p class="sub">Reference-counted crypto-shred. Erase one subject without harming another who shares an identifier. (Clean first so identities exist.)</p>
+        <div class="row">
+          <div class="grow"><input id="subject" placeholder="e.g. Ramesh Iyer"/></div>
+          <div><button class="b-danger" onclick="erase()">Crypto-shred</button></div>
+        </div>
+        <pre id="eout" style="max-height:160px">—</pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot" id="foot">Detection + remediation + governance · runs on the built-in embedder; set OPENAI_API_KEY for API embeddings.</div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+function V(t,k){const v=$("verdict");v.className="verdict"+(k?" "+k:"");$("vtext").textContent=t;}
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function color(s){return esc(s)
+  .replace(/\[ERASED-GDPR\]/g,'<span class="er">[ERASED-GDPR]</span>')
+  .replace(/(&lt;[A-Z_]+_[0-9a-f]+&gt;)/g,'<span class="tok">$1</span>')
+  .replace(/(Aadhaar|PAN|SSN|card|phone) ([^,<]+)/g,(m,a,b)=> /[&]/.test(b)?m:a+' <span class="raw">'+b+'</span>');}
+async function call(p,m,b){try{const r=await fetch(p,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined});return await r.json();}catch(e){return{error:String(e)};}}
+
+async function connect(){V("Connecting to production index…");const r=await call("/connect","POST",{size:+$("size").value});
+  V(r.message,"warn");resetStats();$("foot").textContent="Embedder in use: "+r.embedder+" · "+$("foot").textContent.split('·').slice(1).join('·');}
+function resetStats(){["s_total","s_pii","s_pct","c_re","c_q","c_after"].forEach(i=>$(i).textContent="—");$("bars").innerHTML="";}
+
+async function scan(){V("Scanning uncapped — every vector…");const s=await call("/scan","POST",{});
+  $("s_total").textContent=s.total_vectors.toLocaleString();
+  $("s_pii").textContent=s.total_pii_instances.toLocaleString();
+  $("s_pct").textContent=(s.total_vectors? (100*s.vectors_with_pii/s.total_vectors).toFixed(1):0)+"%";
+  const max=Math.max(1,...Object.values(s.by_type||{}));
+  $("bars").innerHTML=Object.entries(s.by_type||{}).sort((a,b)=>b[1]-a[1]).map(([k,v])=>
+    `<div class="bar"><div class="lab">${k}</div><div class="track"><div class="fill" style="width:${100*v/max}%"></div></div><div class="val">${v}</div></div>`).join("");
+  V(`Scan complete — ${s.total_pii_instances.toLocaleString()} PII instances across ${s.vectors_with_pii.toLocaleString()} vectors`,"warn");}
+
+async function clean(){V("Cleaning — re-embedding poisoned subset…");const c=await call("/clean","POST",{});
+  $("c_re").textContent=c.reembedded; $("c_q").textContent=c.quarantined; $("c_after").textContent=c.pii_after;
+  $("s_pii").textContent=c.pii_after; $("s_pct").textContent="0%";
+  V(`Cleaned: ${c.reembedded} vectors re-embedded, PII now ${c.pii_after} (was flagged). Retrieval preserved.`,"ok");}
+
+async function query(){const role=$("role").value;V("Querying as "+role+"…");const q=await call("/query","POST",{role});
+  const erased=JSON.stringify(q).includes("ERASED-GDPR");
+  $("qout").innerHTML=q.results.map(h=>`[${h.id}] score=${h.score}\n${color(h.text)}`).join("\n\n");
+  V(`${role}: ${q.results.length} results · ${q.governed?"governed (role-gated)":"UNGOVERNED (raw PII visible)"}`,q.governed?"ok":"warn");}
+
+async function erase(){const s=$("subject").value.trim();if(!s){V("Enter a subject name","warn");return;}
+  V("Crypto-shredding "+s+"…");const r=await call("/erase","POST",{subject:s});
+  $("eout").textContent=r.message;V(r.message,r.executed?"ok":"warn");}
+</script>
+</body>
+</html>
