@@ -50,6 +50,16 @@
   .row>.grow{flex:1;min-width:150px}
   input,select{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--ink);
         border-radius:9px;padding:10px 11px;font-size:13.5px;font-family:var(--sans)}
+  .dropzone{border:1px dashed rgba(255,255,255,.18);border-radius:18px;background:rgba(255,255,255,.02);padding:28px 18px;text-align:center;
+    cursor:pointer;transition:background .15s,border-color .15s;color:var(--dim);min-height:170px;display:flex;flex-direction:column;justify-content:center;gap:10px}
+  .dropzone:hover,.dropzone.active{background:rgba(93,143,255,.12);border-color:var(--safe);}
+  .dropzone .icon{font-size:26px;display:block;margin:0 auto;color:var(--safe);}
+  .dropzone .title{font-weight:700;color:var(--ink);margin-bottom:4px;font-size:14px}
+  .dropzone .hint{font-size:13px;color:var(--mute)}
+  .dropzone .file-name{font-size:13px;color:var(--ink);opacity:.75}
+  .hidden-file{display:none}
+  .button-block{display:flex;flex-direction:column;gap:10px;margin-top:12px}
+  .button-block button{width:100%}
   label{display:block;font-size:11.5px;color:var(--dim);margin:10px 0 4px}
   .stat{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:12px 0 4px}
   .stat .k{background:var(--panel2);border:1px solid var(--line);border-radius:11px;padding:12px}
@@ -139,15 +149,15 @@
       <div class="card">
         <h2>Upload PDF</h2>
         <p class="sub">Ingest a local PDF file into the index so it can be scanned and queried.</p>
-        <div class="row" style="align-items:flex-end;gap:8px">
-          <div class="grow">
-            <label>Choose PDF</label>
-            <input id="pdfFile" type="file" accept="application/pdf" />
-          </div>
-          <button class="b-safe" onclick="uploadPdf()">Upload PDF</button>
+        <div id="pdfDropzone" class="dropzone" onclick="triggerPdfPicker()">
+          <div class="icon">⬆</div>
+          <div class="title">Drag and drop a PDF, or click to browse</div>
+          <div id="pdfName" class="file-name">No file chosen</div>
+          <div class="hint">Only PDF files are supported.</div>
         </div>
-        <div class="row" style="align-items:flex-end;gap:8px;margin-top:12px">
-          <div class="grow"></div>
+        <input id="pdfFile" class="hidden-file" type="file" accept="application/pdf" onchange="onPdfSelected()" />
+        <div class="button-block">
+          <button class="b-safe" onclick="uploadPdf()">Upload PDF</button>
           <button class="b-danger" onclick="wipeIndex()">Wipe index</button>
         </div>
       </div>
@@ -225,10 +235,32 @@ async function uploadPdf(){
     const res = await call("/upload_pdf","POST",{filename:file.name,content:b64});
     if(res.error){V(`Upload failed: ${res.error}`,'warn');return;}
     V(`${res.message} (${res.pdf_chunks||res.uploaded} chunks)`,'ok');
+    $("pdfName").textContent = file.name;
   };
   reader.onerror = () => V("Could not read PDF file","warn");
   reader.readAsDataURL(file);
 }
+
+function triggerPdfPicker(){
+  $("pdfFile").click();
+}
+
+function onPdfSelected(){
+  const file = $("pdfFile").files?.[0];
+  $("pdfName").textContent = file ? file.name : "No file chosen";
+}
+
+const dropzone = $("pdfDropzone");
+dropzone.addEventListener("dragover", e => {e.preventDefault(); dropzone.classList.add("active");});
+dropzone.addEventListener("dragleave", e => {e.preventDefault(); dropzone.classList.remove("active");});
+dropzone.addEventListener("drop", e => {
+  e.preventDefault(); dropzone.classList.remove("active");
+  const files = e.dataTransfer.files;
+  if(files?.[0]){
+    $("pdfFile").files = files;
+    onPdfSelected();
+  }
+});
 
 async function clean(){V("Cleaning — re-embedding poisoned subset…");const c=await call("/clean","POST",{});
   $("c_re").textContent=c.reembedded; $("c_q").textContent=c.quarantined; $("c_after").textContent=c.pii_after;
