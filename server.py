@@ -12,7 +12,7 @@ connector (Pinecone/Qdrant/pgvector) from aagcp.store.connectors for production
 — the endpoints don't change. See SMOKE_TEST.md.
 """
 from __future__ import annotations
-import json, os, random, string, tempfile, logging
+import base64, io, json, os, random, re, string, tempfile, logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from dotenv import load_dotenv
@@ -77,6 +77,26 @@ def _aadhaar():
 def _pan():
     return ("".join(random.choice(string.ascii_uppercase) for _ in range(5))
             + f"{random.randint(1000,9999)}" + random.choice(string.ascii_uppercase))
+
+
+def _chunk_text(text: str, max_chars: int = 1200) -> list[str]:
+    if len(text) <= max_chars:
+        return [text]
+    words = text.split()
+    chunks = []
+    cur = []
+    cur_len = 0
+    for w in words:
+        if cur_len + len(w) + (1 if cur else 0) > max_chars:
+            chunks.append(" ".join(cur))
+            cur = [w]
+            cur_len = len(w)
+        else:
+            cur.append(w)
+            cur_len += len(w) + (1 if cur_len else 0)
+    if cur:
+        chunks.append(" ".join(cur))
+    return chunks
 
 
 class Engine:
@@ -164,24 +184,110 @@ class Engine:
             logger.error(f"[SCAN] Error: {type(e).__name__}: {e}")
             raise
 
-    def query(self, role: str) -> dict:
+    def upload_pdf(self, filename: str, content_b64: str) -> dict:
+        logger.info(f"[UPLOAD] Ingesting PDF file: {filename}")
+        try:
+            data = base64.b64decode(content_b64)
+            import pdfplumber
+            with pdfplumber.open(io.BytesIO(data)) as pdf:
+                chunks = []
+                for page_number, page in enumerate(pdf.pages, start=1):
+                    page_text = page.extract_text() or ""
+                    if not page_text.strip():
+                        continue
+                    paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", page_text) if p.strip()]
+                    for paragraph_index, paragraph in enumerate(paragraphs, start=1):
+                        for chunk_index, chunk in enumerate(_chunk_text(paragraph), start=1):
+                            chunks.append((page_number, paragraph_index, chunk_index, chunk))
+
+            if not chunks:
+                return {"uploaded": 0, "message": "No text could be extracted from the PDF."}
+
+            records = []
+            for page_number, paragraph_index, chunk_index, chunk in chunks:
+                record_id = (f"pdf:{Path(filename).stem}:{page_number:03d}:"
+                             f"{paragraph_index:03d}:{chunk_index:03d}")
+                records.append(VectorRecord(
+                    record_id,
+                    self.embedder.embed(chunk),
+                    chunk,
+                    {"source": "pdf",
+                     "pdf_filename": filename,
+                     "page": page_number,
+                     "paragraph": paragraph_index,
+                     "chunk": chunk_index,
+                     "ingested": "pdf_upload"}
+                ))
+
+            for i in range(0, len(records), 50):
+                self.store.upsert(records[i:i+50])
+
+            logger.info(f"[UPLOAD] Inserted {len(records)} PDF chunks into index")
+            return {"uploaded": len(records), "filename": filename,
+                    "pdf_chunks": len(records), "message": "PDF ingested successfully."}
+        except Exception as e:
+            logger.error(f"[UPLOAD] Error ingesting PDF: {type(e).__name__}: {e}")
+            raise
+
+    def wipe_all(self) -> dict:
+        logger.info("[WIPE] Wiping entire vector store")
+        total = self.store.count()
+        if total == 0:
+            logger.info("[WIPE] Index already empty")
+            self.last_report = None
+            self._cleaned = False
+            return {"deleted": 0, "message": "Index was already empty."}
+
+        ids = []
+        for batch in self.store.iter_all(batch=500):
+            ids.extend([r.id for r in batch])
+            if len(ids) >= 500:
+                self.store.delete(ids)
+                ids = []
+        if ids:
+            self.store.delete(ids)
+
+        self.last_report = None
+        self._cleaned = False
+        logger.info(f"[WIPE] Deleted {total} vectors from index")
+        return {"deleted": total, "message": f"Deleted {total} vectors from the index."}
+
+    def query(self, role: str, query_text: str) -> dict:
         logger.info(f"[QUERY] Starting query with role={role}")
         try:
-            reveal = {"ALL"} if role in ("COMPLIANCE_OFFICER", "ADMIN", "DATA_STEWARD") else set()
-            partial = {} if reveal else ANALYST_PARTIAL
+            admin_roles = ("COMPLIANCE_OFFICER", "ADMIN", "DATA_STEWARD")
+            is_admin = role in admin_roles
+            is_finance = role == "FINANCE"
+            reveal = {"ALL"} if is_admin else set()
+            partial = {} if is_admin or is_finance else ANALYST_PARTIAL
             gov = self.last_report is not None and getattr(self, "_cleaned", False)
             logger.info(f"[QUERY] Role reveal={reveal}, governed={gov}, has_report={self.last_report is not None}")
             
             ret = GovernedRetriever(self.store, self.embedder, self.vault,
                                     detector=self.detector if gov else None)
-            hits = ret.query("patients diagnosed with diabetes", reveal, partial, k=3)
+            hits = ret.query(query_text, reveal, partial, k=3)
             logger.info(f"[QUERY] Retrieved {len(hits)} results")
-            
-            results = [{"id": h["id"], "score": round(h.get("score", 0), 3),
-                       "text": (h.get("text") if gov else h.get("source_text") or "")[:220]}
-                      for h in hits]
+
+            results = []
+            for h in hits:
+                if role == "ANALYST_ROLE":
+                    text = ""
+                elif is_finance:
+                    text = h.get("source_text") or ""
+                else:
+                    text = h.get("text") or h.get("source_text") or ""
+                results.append({
+                    "id": h["id"],
+                    "score": round(h.get("score", 0), 3),
+                    "text": text[:220],
+                    "source_text": h.get("source_text") or "",
+                    "metadata": h.get("metadata") or {}
+                })
+
+            answer = results[0]["text"] if results else ""
             logger.info(f"[QUERY] Complete")
-            return {"role": role, "governed": gov, "results": results}
+            return {"role": role, "governed": gov, "query": query_text,
+                    "answer": answer, "results": results}
         except Exception as e:
             logger.error(f"[QUERY] Error: {type(e).__name__}: {e}")
             raise
@@ -301,8 +407,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, STATE.scan())
             if self.path == "/query":
                 role = b.get("role", "ANALYST_ROLE")
+                query_text = b.get("query", "patients diagnosed with diabetes")
                 logger.info(f"[HTTP] /query endpoint (role={role})")
-                return self._send(200, STATE.query(role))
+                return self._send(200, STATE.query(role, query_text))
             if self.path == "/clean":
                 logger.info(f"[HTTP] /clean endpoint")
                 return self._send(200, STATE.clean())
@@ -310,6 +417,14 @@ class Handler(BaseHTTPRequestHandler):
                 subject = (b.get("subject") or "").strip()
                 logger.info(f"[HTTP] /erase endpoint (subject='{subject}')")
                 return self._send(200, STATE.erase(subject))
+            if self.path == "/upload_pdf":
+                filename = b.get("filename", "uploaded.pdf")
+                content = b.get("content", "")
+                logger.info(f"[HTTP] /upload_pdf endpoint (filename={filename})")
+                return self._send(200, STATE.upload_pdf(filename, content))
+            if self.path == "/wipe":
+                logger.info("[HTTP] /wipe endpoint")
+                return self._send(200, STATE.wipe_all())
             logger.warning(f"[HTTP] 404 - {self.path} not found")
             return self._send(404, {"error": "not found"})
         except Exception as e:

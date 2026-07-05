@@ -109,7 +109,7 @@
         <div class="stat">
           <div class="k"><div id="s_total" class="n ink">—</div><div class="l">Vectors</div></div>
           <div class="k"><div id="s_pii" class="n amber">—</div><div class="l">PII instances</div></div>
-          <div class="k"><div id="s_pct" class="n amber">—</div><div class="l">% with PII</div></div>
+          <div class="k"><div id="s_pct" class="n amber">—</div><div class="l">PII per vector</div></div>
         </div>
         <div id="bars" class="bars"></div>
       </div>
@@ -121,7 +121,7 @@
         <div class="stat">
           <div class="k"><div id="c_re" class="n safe">—</div><div class="l">Re-embedded</div></div>
           <div class="k"><div id="c_q" class="n ink">—</div><div class="l">Quarantined</div></div>
-          <div class="k"><div id="c_after" class="n safe">—</div><div class="l">PII after</div></div>
+          <div class="k"><div id="c_after" class="n safe">—</div><div class="l">PII maksed</div></div>
         </div>
       </div>
 
@@ -137,18 +137,41 @@
     <!-- RIGHT: govern -->
     <div style="display:flex;flex-direction:column;gap:16px">
       <div class="card">
+        <h2>Upload PDF</h2>
+        <p class="sub">Ingest a local PDF file into the index so it can be scanned and queried.</p>
+        <div class="row" style="align-items:flex-end;gap:8px">
+          <div class="grow">
+            <label>Choose PDF</label>
+            <input id="pdfFile" type="file" accept="application/pdf" />
+          </div>
+          <button class="b-safe" onclick="uploadPdf()">Upload PDF</button>
+        </div>
+        <div class="row" style="align-items:flex-end;gap:8px;margin-top:12px">
+          <div class="grow"></div>
+          <button class="b-danger" onclick="wipeIndex()">Wipe index</button>
+        </div>
+      </div>
+
+      <div class="card">
         <h2>3 · Query — role decides reveal <span class="pill">same vectors</span></h2>
         <p class="sub">Before cleaning: raw PII leaks. After cleaning: role-gated rehydration.</p>
         <div class="row">
           <div class="grow">
+            <label>Query</label>
+            <input id="queryText" type="text" value="patients diagnosed with diabetes" placeholder="Enter a query" />
+          </div>
+          <div style="align-self:flex-end"><button class="b-accent" onclick="query()">Run query</button></div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <div class="grow">
             <label>Role</label>
             <select id="role">
               <option>ANALYST_ROLE</option>
+              <option>FINANCE</option>
               <option>COMPLIANCE_OFFICER</option>
               <option>ADMIN</option>
             </select>
           </div>
-          <div style="align-self:flex-end"><button class="b-accent" onclick="query()">Run query</button></div>
         </div>
         <pre id="qout">Run a query to see results.</pre>
       </div>
@@ -185,21 +208,60 @@ function resetStats(){["s_total","s_pii","s_pct","c_re","c_q","c_after"].forEach
 async function scan(){V("Scanning uncapped — every vector…");const s=await call("/scan","POST",{});
   $("s_total").textContent=s.total_vectors.toLocaleString();
   $("s_pii").textContent=s.total_pii_instances.toLocaleString();
-  $("s_pct").textContent=(s.total_vectors? (100*s.vectors_with_pii/s.total_vectors).toFixed(1):0)+"%";
+  $("s_pct").textContent=(s.total_vectors? (s.total_pii_instances/s.total_vectors).toFixed(2):0);
   const max=Math.max(1,...Object.values(s.by_type||{}));
   $("bars").innerHTML=Object.entries(s.by_type||{}).sort((a,b)=>b[1]-a[1]).map(([k,v])=>
     `<div class="bar"><div class="lab">${k}</div><div class="track"><div class="fill" style="width:${100*v/max}%"></div></div><div class="val">${v}</div></div>`).join("");
   V(`Scan complete — ${s.total_pii_instances.toLocaleString()} PII instances across ${s.vectors_with_pii.toLocaleString()} vectors`,"warn");}
+
+async function uploadPdf(){
+  const file = $("pdfFile").files?.[0];
+  if(!file){V("Pick a PDF file to upload","warn");return;}
+  V(`Uploading ${file.name}...`);
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const dataUrl = reader.result || "";
+    const b64 = dataUrl.split(",",2)[1] || "";
+    const res = await call("/upload_pdf","POST",{filename:file.name,content:b64});
+    if(res.error){V(`Upload failed: ${res.error}`,'warn');return;}
+    V(`${res.message} (${res.pdf_chunks||res.uploaded} chunks)`,'ok');
+  };
+  reader.onerror = () => V("Could not read PDF file","warn");
+  reader.readAsDataURL(file);
+}
 
 async function clean(){V("Cleaning — re-embedding poisoned subset…");const c=await call("/clean","POST",{});
   $("c_re").textContent=c.reembedded; $("c_q").textContent=c.quarantined; $("c_after").textContent=c.pii_after;
   $("s_pii").textContent=c.pii_after; $("s_pct").textContent="0%";
   V(`Cleaned: ${c.reembedded} vectors re-embedded, PII now ${c.pii_after} (was flagged). Retrieval preserved.`,"ok");}
 
-async function query(){const role=$("role").value;V("Querying as "+role+"…");const q=await call("/query","POST",{role});
-  const erased=JSON.stringify(q).includes("ERASED-GDPR");
-  $("qout").innerHTML=q.results.map(h=>`[${h.id}] score=${h.score}\n${color(h.text)}`).join("\n\n");
-  V(`${role}: ${q.results.length} results · ${q.governed?"governed (role-gated)":"UNGOVERNED (raw PII visible)"}`,q.governed?"ok":"warn");}
+async function query(){
+  const role = $("role").value;
+  const queryText = $("queryText").value.trim();
+  if(!queryText){V("Enter a query before running","warn");return;}
+  V("Querying as "+role+"…");
+  const q = await call("/query","POST",{role, query: queryText});
+  if(q.error){V(`Query failed: ${q.error}`,'warn');return;}
+
+  let out = `Query: ${esc(q.query || queryText)}\n`;
+  out += `Answer: ${esc(q.answer || "No answer returned")}\n\n`;
+  out += q.results.map((h, idx) =>
+    `Chunk ${idx + 1} [${h.id}] score=${h.score}\n${color(h.text || h.source_text || "[hidden]")}\n` +
+    `Metadata: ${esc(JSON.stringify(h.metadata || {}))}`
+  ).join("\n\n---\n\n");
+
+  $("qout").textContent = out;
+  V(`${role}: ${q.results.length} results · ${q.governed?"governed (role-gated)":"UNGOVERNED (raw PII visible)"}`, q.governed?"ok":"warn");
+}
+
+async function wipeIndex(){
+  if(!confirm("Delete all vectors from the connected index? This cannot be undone.")) return;
+  V("Wiping entire index…");
+  const r = await call("/wipe","POST",{});
+  if(r.error){V(`Wipe failed: ${r.error}`,'warn');return;}
+  resetStats();
+  V(r.message,'warn');
+}
 
 async function erase(){const s=$("subject").value.trim();if(!s){V("Enter a subject name","warn");return;}
   V("Crypto-shredding "+s+"…");const r=await call("/erase","POST",{subject:s});

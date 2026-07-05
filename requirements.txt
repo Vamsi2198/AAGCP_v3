@@ -3,6 +3,7 @@ pyyaml
 reportlab
 python-dotenv
 pinecone
+pdfplumber
 # Optional — only used if OPENAI_API_KEY is set (API embeddings, no torch):
 openai
 # Production backends (install only what you connect to):
