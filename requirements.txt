@@ -1,9 +1,11 @@
 numpy
 pyyaml
 reportlab
+python-dotenv
+pinecone-client
 # Optional — only used if OPENAI_API_KEY is set (API embeddings, no torch):
 openai
 # Production backends (install only what you connect to):
 # presidio-analyzer   presidio-anonymizer   # global NER (names/addresses)
 # sentence-transformers                      # local embeddings (needs more RAM)
-# pinecone-client | qdrant-client | psycopg[binary]  # vector DB connectors
+# qdrant-client | psycopg[binary]            # alternate vector DB connectors
