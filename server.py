@@ -127,7 +127,7 @@ class Engine:
         self._cleaned = False
         self.last_report = None
 
-    def reset(self, seed: int = 120) -> dict:
+    def reset(self, seed: int = 1) -> dict:
         logger.info(f"[RESET] Resetting engine with seed={seed}")
         random.seed(7)
         self.store = PineconeConnector(self._pinecone_index)
@@ -140,7 +140,7 @@ class Engine:
 
         names = set()
         logger.info(f"[RESET] Starting to upsert {seed} vectors...")
-        for i in range(seed):
+        for i in range(1):
             fn, ln, cond = random.choice(FIRST), random.choice(LAST), random.choice(COND)
             names.add(f"{fn} {ln}")
             if i % 3 == 0:
