@@ -60,6 +60,14 @@
   .hidden-file{display:none}
   .button-block{display:flex;flex-direction:column;gap:10px;margin-top:12px}
   .button-block button{width:100%}
+  .modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.75);display:none;align-items:center;justify-content:center;z-index:20;padding:10px}
+  .modal-backdrop.active{display:flex}
+  .modal{background:var(--panel);border:1px solid var(--line);border-radius:16px;max-width:100%;width:min(980px,calc(100% - 40px));max-height:100vh;height:calc(100vh - 20px);overflow:hidden;display:flex;flex-direction:column;box-shadow:0 16px 60px rgba(0,0,0,.45)}
+  .modal-header{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--line);flex:none}
+  .modal-header h3{margin:0;font-size:14px;color:var(--ink)}
+  .modal-close{background:none;border:0;color:var(--dim);font-size:20px;cursor:pointer;line-height:1}
+  .modal-body{background:var(--bg);padding:0;height:calc(100% - 52px);overflow:hidden}
+  .modal-body iframe{width:100%;height:100%;border:0}
   label{display:block;font-size:11.5px;color:var(--dim);margin:10px 0 4px}
   .stat{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:12px 0 4px}
   .stat .k{background:var(--panel2);border:1px solid var(--line);border-radius:11px;padding:12px}
@@ -158,6 +166,7 @@
         <input id="pdfFile" class="hidden-file" type="file" accept="application/pdf" onchange="onPdfSelected()" />
         <div class="button-block">
           <button class="b-safe" onclick="uploadPdf()">Upload PDF</button>
+          <button class="b-ghost" id="previewPdfBtn" onclick="openPdfPreview()" disabled>👁️ Preview PDF</button>
           <button class="b-danger" onclick="wipeIndex()">Wipe index</button>
         </div>
       </div>
@@ -224,6 +233,8 @@ async function scan(){V("Scanning uncapped — every vector…");const s=await c
     `<div class="bar"><div class="lab">${k}</div><div class="track"><div class="fill" style="width:${100*v/max}%"></div></div><div class="val">${v}</div></div>`).join("");
   V(`Scan complete — ${s.total_pii_instances.toLocaleString()} PII instances across ${s.vectors_with_pii.toLocaleString()} vectors`,"warn");}
 
+let selectedPdfDataUrl = "";
+
 async function uploadPdf(){
   const file = $("pdfFile").files?.[0];
   if(!file){V("Pick a PDF file to upload","warn");return;}
@@ -231,6 +242,8 @@ async function uploadPdf(){
   const reader = new FileReader();
   reader.onload = async () => {
     const dataUrl = reader.result || "";
+    selectedPdfDataUrl = dataUrl;
+    $("previewPdfBtn").disabled = false;
     const b64 = dataUrl.split(",",2)[1] || "";
     const res = await call("/upload_pdf","POST",{filename:file.name,content:b64});
     if(res.error){V(`Upload failed: ${res.error}`,'warn');return;}
@@ -239,6 +252,35 @@ async function uploadPdf(){
   };
   reader.onerror = () => V("Could not read PDF file","warn");
   reader.readAsDataURL(file);
+}
+
+function openPdfPreview(){
+  const file = $("pdfFile").files?.[0];
+  if(!file && !selectedPdfDataUrl){
+    V("Select a PDF first to preview","warn");
+    return;
+  }
+  const preview = $("pdfPreviewFrame");
+  if(selectedPdfDataUrl){
+    preview.src = selectedPdfDataUrl;
+  } else {
+    const reader = new FileReader();
+    reader.onload = () => {
+      selectedPdfDataUrl = reader.result || "";
+      preview.src = selectedPdfDataUrl;
+      $("previewPdfBtn").disabled = false;
+      $("pdfName").textContent = file.name;
+      $("pdfBackdrop").classList.add("active");
+    };
+    reader.readAsDataURL(file);
+    return;
+  }
+  $("pdfBackdrop").classList.add("active");
+}
+
+function closePdfPreview(){
+  $("pdfBackdrop").classList.remove("active");
+  $("pdfPreviewFrame").src = "";
 }
 
 function triggerPdfPicker(){
@@ -298,6 +340,15 @@ async function wipeIndex(){
 async function erase(){const s=$("subject").value.trim();if(!s){V("Enter a subject name","warn");return;}
   V("Crypto-shredding "+s+"…");const r=await call("/erase","POST",{subject:s});
   $("eout").textContent=r.message;V(r.message,r.executed?"ok":"warn");}
-</script>
-</body>
+</script><div id="pdfBackdrop" class="modal-backdrop" onclick="closePdfPreview()">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h3>PDF Preview</h3>
+      <button class="modal-close" onclick="closePdfPreview()">✕</button>
+    </div>
+    <div class="modal-body">
+      <iframe id="pdfPreviewFrame" title="PDF preview"></iframe>
+    </div>
+  </div>
+</div></body>
 </html>
