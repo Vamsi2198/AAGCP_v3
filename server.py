@@ -323,6 +323,7 @@ class Engine:
             for page_number, paragraph_index, chunk_index, chunk in chunks:
                 record_id = (f"pdf:{safe_stem}:{page_number:03d}:"
                              f"{paragraph_index:03d}:{chunk_index:03d}")
+                logger.info(f"[UPLOAD] record_id={record_id!r}")
                 records.append(VectorRecord(
                     record_id,
                     self.embedder.embed(chunk),
