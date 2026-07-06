@@ -70,6 +70,7 @@ class Scanner:
         type_ctr: Counter = Counter()
         juris_ctr: Counter = Counter()
         batch_count = 0
+        logger.info(f"[SCANNER] Connected successfully")
 
         for chunk in store.iter_all(batch=batch):
             batch_count += 1
