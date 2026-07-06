@@ -122,6 +122,46 @@ class PineconeConnector(VectorStoreConnector):
     def count(self):
         return int(self._ix.describe_index_stats().get("total_vector_count", 0))
 
+    def _extract_ids_from_list_response(self, list_response):
+        ids = []
+        if hasattr(list_response, 'vectors') and list_response.vectors:
+            for item in list_response.vectors:
+                if hasattr(item, 'id'):
+                    ids.append(item.id)
+                elif isinstance(item, dict) and 'id' in item:
+                    ids.append(item['id'])
+        elif isinstance(list_response, dict) and 'vectors' in list_response:
+            for item in list_response['vectors'] or []:
+                if isinstance(item, dict) and 'id' in item:
+                    ids.append(item['id'])
+        return ids
+
+    def _extract_records_from_fetch(self, fetched):
+        recs = []
+        vectors = None
+        if hasattr(fetched, 'vectors'):
+            vectors = fetched.vectors
+        elif isinstance(fetched, dict):
+            vectors = fetched.get('vectors')
+
+        if isinstance(vectors, dict):
+            for vid, v in vectors.items():
+                md = dict(v.get("metadata") or {})
+                recs.append(VectorRecord(vid, None,
+                                        md.get("source_text") or md.get("text"),
+                                        md))
+        elif isinstance(vectors, list):
+            for item in vectors:
+                if isinstance(item, dict):
+                    vid = item.get('id')
+                    if vid is None:
+                        continue
+                    md = dict(item.get('metadata') or {})
+                    recs.append(VectorRecord(vid, None,
+                                            md.get("source_text") or md.get("text"),
+                                            md))
+        return recs
+
     def iter_all(self, batch: int = 500):
         """
         Stream ALL records in batches via index.list() pagination.
@@ -133,37 +173,31 @@ class PineconeConnector(VectorStoreConnector):
         # Collect IDs from all list responses
         all_ids = []
         for list_response in list_gen:
-            if hasattr(list_response, 'vectors') and list_response.vectors:
-                # Each ListItem has only 'id' and 'metadata'
-                for item in list_response.vectors:
-                    all_ids.append(item.id)
-        
+            ids = self._extract_ids_from_list_response(list_response)
+            all_ids.extend(ids)
+
+        if not all_ids:
+            logger.warning("[PINECONE] iter_all found no IDs from list()")
+
         # Fetch actual vectors in batches and yield
         for i in range(0, len(all_ids), batch):
             batch_ids = all_ids[i:i + batch]
             if batch_ids:
                 try:
                     fetched = self._ix.fetch(ids=batch_ids, namespace=self._ns if self._ns else None)
-                    recs = []
-                    if hasattr(fetched, 'vectors'):
-                        for vid, v in fetched.vectors.items():
-                            md = dict(v.get("metadata") or {})
-                            recs.append(VectorRecord(vid, None,
-                                                    md.get("source_text") or md.get("text"),
-                                                    md))
+                    recs = self._extract_records_from_fetch(fetched)
+                    if not recs:
+                        logger.warning("[PINECONE] fetch returned no records for batch", extra={"batch_ids": batch_ids})
                     if recs:
                         yield recs
-                except Exception:
-                    # Skip this batch if fetch fails
+                except Exception as exc:
+                    logger.exception("[PINECONE] fetch failed in iter_all", exc_info=exc)
                     continue
 
     def fetch(self, ids):
         out = []
-        for vid, v in self._ix.fetch(ids=ids, namespace=self._ns).vectors.items():
-            md = dict(v.get("metadata") or {})
-            out.append(VectorRecord(vid, None,
-                                    md.get("source_text") or md.get("text"),
-                                    md))
+        fetched = self._ix.fetch(ids=ids, namespace=self._ns)
+        out.extend(self._extract_records_from_fetch(fetched))
         return out
 
     def upsert(self, records):
