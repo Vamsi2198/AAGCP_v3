@@ -183,24 +183,86 @@ class PineconeConnector(VectorStoreConnector):
 
         if vectors is None and isinstance(payload, dict):
             vectors = payload.get('results') or payload.get('items') or payload.get('vectors')
-            if vectors is None:
-                # Sometimes Pinecone fetch responses are a direct id->vector mapping,
-                # or they are wrapped by namespace. Try to detect a vector dictionary.
-                def looks_like_vector_map(candidate):
-                    if not isinstance(candidate, dict) or not candidate:
-                        return False
-                    sample_vals = list(candidate.values())[:3]
-                    return all(
-                        isinstance(val, dict) or hasattr(val, 'metadata') or hasattr(val, 'values')
-                        for val in sample_vals
-                    )
+            if hasattr(vectors, '__len__') and len(vectors) == 0:
+                vectors = None
 
+            def looks_like_vector_map(candidate):
+                if not isinstance(candidate, dict) or not candidate:
+                    return False
+                sample_vals = list(candidate.values())[:3]
+                return all(
+                    isinstance(val, dict) and (
+                        'metadata' in val or 'meta' in val or 'values' in val or hasattr(val, 'metadata') or hasattr(val, 'values')
+                    )
+                    for val in sample_vals
+                )
+
+            def find_vector_container(obj, depth=0):
+                if depth > 5 or not isinstance(obj, dict):
+                    return None
+                if looks_like_vector_map(obj):
+                    return obj
+                for key, value in obj.items():
+                    if isinstance(value, dict):
+                        found = find_vector_container(value, depth + 1)
+                        if found is not None:
+                            return found
+                    elif isinstance(value, list):
+                        for item in value[:5]:
+                            if isinstance(item, dict):
+                                found = find_vector_container(item, depth + 1)
+                                if found is not None:
+                                    return found
+                return None
+
+            if vectors is None:
                 if looks_like_vector_map(payload):
                     vectors = payload
                 elif len(payload) == 1:
                     nested = next(iter(payload.values()))
                     if looks_like_vector_map(nested):
                         vectors = nested
+                if vectors is None:
+                    found = find_vector_container(payload)
+                    if found is not None:
+                        vectors = found
+                        logger.info(
+                            "[PINECONE] _extract_records_from_fetch found nested vector container",
+                            extra={"vectors_type": type(vectors).__name__, "vectors_len": len(vectors)}
+                        )
+                if vectors is None:
+                    for key in ('results', 'items', 'matches', 'records', 'vectors'):
+                        candidate = payload.get(key)
+                        if candidate and hasattr(candidate, '__len__') and len(candidate) > 0:
+                            vectors = candidate
+                            logger.info(
+                                "[PINECONE] _extract_records_from_fetch falling back to payload key",
+                                extra={"payload_key": key, "candidate_type": type(candidate).__name__, "candidate_len": len(candidate)}
+                            )
+                            break
+                if vectors is None:
+                    for key, candidate in payload.items():
+                        if key in ('namespace', 'index', 'status', 'query'):
+                            continue
+                        if isinstance(candidate, dict) and candidate:
+                            vectors = candidate
+                            logger.info(
+                                "[PINECONE] _extract_records_from_fetch using non-empty payload field",
+                                extra={"payload_key": key, "candidate_type": type(candidate).__name__, "candidate_len": len(candidate)}
+                            )
+                            break
+                        if isinstance(candidate, list) and candidate:
+                            vectors = candidate
+                            logger.info(
+                                "[PINECONE] _extract_records_from_fetch using non-empty payload list",
+                                extra={"payload_key": key, "candidate_type": type(candidate).__name__, "candidate_len": len(candidate)}
+                            )
+                            break
+                if vectors is None:
+                    logger.info(
+                        "[PINECONE] _extract_records_from_fetch could not find vector payload container",
+                        extra={"payload_keys": list(payload.keys())}
+                    )
 
         if isinstance(vectors, dict):
             for vid, v in vectors.items():
