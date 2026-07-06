@@ -181,9 +181,9 @@ class PineconeConnector(VectorStoreConnector):
         if payload is None and isinstance(fetched, dict):
             payload = fetched
 
-        if not vectors and isinstance(payload, dict):
+        if vectors is None and isinstance(payload, dict):
             vectors = payload.get('results') or payload.get('items') or payload.get('vectors')
-            if not vectors:
+            if vectors is None:
                 # Sometimes Pinecone fetch responses are a direct id->vector mapping,
                 # or they are wrapped by namespace. Try to detect a vector dictionary.
                 def looks_like_vector_map(candidate):
