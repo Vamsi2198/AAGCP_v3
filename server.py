@@ -138,7 +138,29 @@ class Engine:
         self.last_report = None
         logger.info(f"[RESET] Vault initialized, cleaned=False")
         
-        # Keep the connector, vault, and scanner initialization, but do not seed synthetic demo data.
+        names = set()
+        logger.info(f"[RESET] Starting to upsert {seed} vectors...")
+        for i in range(seed):
+            fn, ln, cond = random.choice(FIRST), random.choice(LAST), random.choice(COND)
+            names.add(f"{fn} {ln}")
+            if i % 3 == 0:
+                text = (f"Patient {fn} {ln}, Aadhaar {_aadhaar()}, phone +91 9{random.randint(100000000,999999999)}, "
+                        f"MRN-{random.randint(100000,999999)}, diagnosed with {cond}.")
+            elif i % 3 == 1:
+                text = (f"Patient {fn} {ln}, PAN {_pan()}, email {fn.lower()}.{ln.lower()}@example.com, "
+                        f"MRN-{random.randint(100000,999999)}, {cond}.")
+            else:
+                text = (f"Member {fn} {ln}, SSN {random.randint(100,899)}-{random.randint(10,99)}-{random.randint(1000,9999)}, "
+                        f"card 4{random.randint(100000000000000,999999999999999)}, {cond}.")
+            self.store.upsert([VectorRecord(f"vec_{i:04d}", self.embedder.embed(text),
+                                            text, {"ingested": "legacy"})])
+            if (i + 1) % 30 == 0:
+                logger.info(f"[RESET] Upserted {i + 1}/{seed} vectors")
+        
+        logger.info(f"[RESET] Upsert complete")
+        self.detector.person_lexicon = sorted(names, key=len, reverse=True)
+        logger.info(f"[RESET] Person lexicon set with {len(names)} names")
+        
         self.scanner = Scanner(self.detector)
         logger.info(f"[RESET] Scanner initialized")
         

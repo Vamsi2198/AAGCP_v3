@@ -74,7 +74,7 @@ class Scanner:
 
         for chunk in store.iter_all(batch=batch):
             batch_count += 1
-            logger.debug(f"[SCANNER] Processing batch {batch_count} with {len(chunk)} records")
+            logger.info(f"[SCANNER] Processing batch {batch_count} with {len(chunk)} records")
             
             for rec in chunk:
                 rep.scanned_vectors += 1
