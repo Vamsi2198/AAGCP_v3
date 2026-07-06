@@ -99,6 +99,13 @@ def _chunk_text(text: str, max_chars: int = 1200) -> list[str]:
     return chunks
 
 
+def _safe_id_component(s: str) -> str:
+    """Make a string safe for use in a Pinecone vector ID."""
+    s = re.sub(r'\s+', '_', s.strip())
+    s = re.sub(r'[^A-Za-z0-9_\-]', '', s)
+    return s or "file"
+
+
 class Engine:
     def __init__(self):
         logger.info("[ENGINE] Initializing Engine...")
@@ -312,8 +319,9 @@ class Engine:
                 return {"uploaded": 0, "message": "No text could be extracted from the PDF."}
 
             records = []
+            safe_stem = _safe_id_component(Path(filename).stem)
             for page_number, paragraph_index, chunk_index, chunk in chunks:
-                record_id = (f"pdf:{Path(filename).stem}:{page_number:03d}:"
+                record_id = (f"pdf:{safe_stem}:{page_number:03d}:"
                              f"{paragraph_index:03d}:{chunk_index:03d}")
                 records.append(VectorRecord(
                     record_id,
