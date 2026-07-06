@@ -203,6 +203,23 @@ class Engine:
             logger.error(f"[SCAN] Error: {type(e).__name__}: {e}")
             raise
 
+    def pinecone_health(self) -> dict:
+        logger.info("[HEALTH] Checking Pinecone connection and sample chunks")
+        current_count = self.store.count()
+        chunks = []
+        for batch in self.store.iter_all(batch=10):
+            for rec in batch:
+                if len(chunks) >= 10:
+                    break
+                chunks.append({
+                    "id": rec.id,
+                    "source_text": (rec.source_text or "")[:220],
+                    "metadata": rec.metadata or {}
+                })
+            if len(chunks) >= 10:
+                break
+        return {"ok": True, "count": current_count, "top_chunks": chunks}
+
     def upload_pdf(self, filename: str, content_b64: str) -> dict:
         logger.info(f"[UPLOAD] Ingesting PDF file: {filename}")
         try:
@@ -404,6 +421,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/health":
             return self._send(200, {"ok": True, "embedder": STATE.embedder.name,
                                     "coverage": STATE.detector.coverage()})
+        if self.path == "/pinecone_health":
+            return self._send(200, STATE.pinecone_health())
         if self.path == "/report.pdf":
             pdf = STATE.report_pdf()
             self.send_response(200)

@@ -122,7 +122,13 @@
           <div style="align-self:flex-end;display:flex;gap:8px">
             <button class="b-accent" onclick="connect()">Connect</button>
             <button class="b-ghost" onclick="scan()">Scan</button>
+            <button class="b-safe" onclick="pineconeHealth()">Pinecone Health</button>
           </div>
+        </div>
+        <div id="healthPanel" class="card" style="margin-top:12px;display:none;">
+          <h2>Pinecone health</h2>
+          <p class="sub">Check connection and show the first 10 chunks.</p>
+          <pre id="healthOut">Press Pinecone Health to check connection.</pre>
         </div>
         <div class="stat">
           <div class="k"><div id="s_total" class="n ink">—</div><div class="l">Vectors</div></div>
@@ -309,6 +315,23 @@ async function clean(){V("Cleaning — re-embedding poisoned subset…");const c
   $("s_pii").textContent=c.pii_after; $("s_pct").textContent="0%";
   V(`Cleaned: ${c.reembedded} vectors re-embedded, PII now ${c.pii_after} (was flagged). Retrieval preserved.`,"ok");}
 
+async function pineconeHealth(){
+  V("Checking Pinecone connection…");
+  const r = await call("/pinecone_health","GET");
+  if(r.error){
+    V(`Health check failed: ${r.error}`,'warn');
+    $("healthOut").textContent = `Error: ${r.error}`;
+    $("healthPanel").style.display = "block";
+    return;
+  }
+  $("healthOut").textContent = `Pinecone OK: ${r.ok}\nVectors in index: ${r.count}\n\nTop ${r.top_chunks.length} chunks:\n` +
+    r.top_chunks.map((c,i) =>
+      `#${i+1} ${c.id}\n${c.source_text}\nmetadata: ${JSON.stringify(c.metadata)}\n`
+    ).join("\n");
+  $("healthPanel").style.display = "block";
+  V("Pinecone health OK","ok");
+}
+
 async function query(){
   const role = $("role").value;
   const queryText = $("queryText").value.trim();
@@ -326,6 +349,23 @@ async function query(){
 
   $("qout").textContent = out;
   V(`${role}: ${q.results.length} results · ${q.governed?"governed (role-gated)":"UNGOVERNED (raw PII visible)"}`, q.governed?"ok":"warn");
+}
+
+async function pineconeHealth(){
+  V("Checking Pinecone connection…");
+  const r = await call("/pinecone_health","GET");
+  if(r.error){
+    V(`Health check failed: ${r.error}`,'warn');
+    $("healthOut").textContent = `Error: ${r.error}`;
+    $("healthPanel").style.display = "block";
+    return;
+  }
+  $("healthOut").textContent = `Pinecone OK: ${r.ok}\nVectors in index: ${r.count}\n\nTop ${r.top_chunks.length} chunks:\n` +
+    r.top_chunks.map((c,i) =>
+      `#${i+1} ${c.id}\n${c.source_text}\nmetadata: ${JSON.stringify(c.metadata)}\n`
+    ).join("\n");
+  $("healthPanel").style.display = "block";
+  V("Pinecone health OK","ok");
 }
 
 async function wipeIndex(){
