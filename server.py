@@ -204,20 +204,92 @@ class Engine:
             raise
 
     def pinecone_health(self) -> dict:
-        logger.info("[HEALTH] Checking Pinecone connection and sample chunks")
-        current_count = self.store.count()
+        logger.info("[HEALTH] Checking Pinecone connection and sample chunks directly from Pinecone")
+        current_count = int(self._pinecone_index.describe_index_stats().get("total_vector_count", 0))
+        ids = []
+        namespace = self._pinecone_index.namespace if hasattr(self._pinecone_index, 'namespace') else os.getenv('PINECONE_NAMESPACE', '')
+        try:
+            list_gen = self._pinecone_index.list(namespace=namespace if namespace else None)
+            for list_response in list_gen:
+                if hasattr(list_response, 'vectors') and list_response.vectors:
+                    for item in list_response.vectors:
+                        if hasattr(item, 'id'):
+                            ids.append(item.id)
+                        elif isinstance(item, dict) and 'id' in item:
+                            ids.append(item['id'])
+                elif isinstance(list_response, dict) and list_response.get('vectors'):
+                    for item in list_response.get('vectors'):
+                        if isinstance(item, dict) and 'id' in item:
+                            ids.append(item['id'])
+        except Exception as exc:
+            logger.exception("[HEALTH] Pinecone list() failed", exc_info=exc)
+            return {"ok": False, "error": str(exc), "top_chunks": []}
+
         chunks = []
-        for batch in self.store.iter_all(batch=10):
-            for rec in batch:
+        for i in range(0, len(ids), 10):
+            batch_ids = ids[i:i + 10]
+            try:
+                fetched = self._pinecone_index.fetch(ids=batch_ids, namespace=namespace if namespace else None)
+                payload = None
+                if hasattr(fetched, 'to_dict'):
+                    payload = fetched.to_dict()
+                elif isinstance(fetched, dict):
+                    payload = fetched
+
+                vectors = None
+                if hasattr(fetched, 'vectors'):
+                    vectors = fetched.vectors
+                elif isinstance(payload, dict):
+                    vectors = payload.get('vectors')
+
+                if isinstance(vectors, dict):
+                    for vid, item in vectors.items():
+                        if len(chunks) >= 10:
+                            break
+                        meta = {}
+                        if isinstance(item, dict):
+                            meta = item.get('metadata') or item.get('meta') or {}
+                        else:
+                            meta = getattr(item, 'metadata', None) or getattr(item, 'meta', None) or {}
+                        if hasattr(meta, 'to_dict'):
+                            try:
+                                meta = meta.to_dict()
+                            except Exception:
+                                meta = dict(meta or {})
+                        chunks.append({
+                            'id': vid,
+                            'source_text': (meta.get('source_text') or meta.get('text') or '')[:220],
+                            'metadata': meta or {}
+                        })
+                elif isinstance(vectors, list):
+                    for rec in vectors:
+                        if len(chunks) >= 10:
+                            break
+                        vid = None
+                        meta = {}
+                        if isinstance(rec, dict):
+                            vid = rec.get('id')
+                            meta = rec.get('metadata') or rec.get('meta') or {}
+                        else:
+                            vid = getattr(rec, 'id', None)
+                            meta = getattr(rec, 'metadata', None) or getattr(rec, 'meta', None) or {}
+                        if hasattr(meta, 'to_dict'):
+                            try:
+                                meta = meta.to_dict()
+                            except Exception:
+                                meta = dict(meta or {})
+                        if vid is not None:
+                            chunks.append({
+                                'id': vid,
+                                'source_text': (meta.get('source_text') or meta.get('text') or '')[:220],
+                                'metadata': meta or {}
+                            })
                 if len(chunks) >= 10:
                     break
-                chunks.append({
-                    "id": rec.id,
-                    "source_text": (rec.source_text or "")[:220],
-                    "metadata": rec.metadata or {}
-                })
-            if len(chunks) >= 10:
+            except Exception as exc:
+                logger.exception("[HEALTH] Pinecone fetch() failed", exc_info=exc)
                 break
+
         return {"ok": True, "count": current_count, "top_chunks": chunks}
 
     def upload_pdf(self, filename: str, content_b64: str) -> dict:
