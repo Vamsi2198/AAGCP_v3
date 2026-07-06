@@ -176,6 +176,7 @@ class PineconeConnector(VectorStoreConnector):
             ids = self._extract_ids_from_list_response(list_response)
             all_ids.extend(ids)
 
+        logger.info("[PINECONE] iter_all collected IDs", extra={"count": len(all_ids)})
         if not all_ids:
             logger.warning("[PINECONE] iter_all found no IDs from list()")
 
@@ -185,9 +186,21 @@ class PineconeConnector(VectorStoreConnector):
             if batch_ids:
                 try:
                     fetched = self._ix.fetch(ids=batch_ids, namespace=self._ns if self._ns else None)
+                    vectors = None
+                    if hasattr(fetched, 'vectors'):
+                        vectors = fetched.vectors
+                    elif isinstance(fetched, dict):
+                        vectors = fetched.get('vectors')
+                    elif hasattr(fetched, 'to_dict'):
+                        vectors = fetched.to_dict().get('vectors')
+                    logger.info("[PINECONE] fetch response shape", extra={
+                        "fetched_type": type(fetched).__name__,
+                        "vectors_type": type(vectors).__name__ if vectors is not None else None,
+                        "vectors_len": len(vectors) if hasattr(vectors, '__len__') else None,
+                    })
                     recs = self._extract_records_from_fetch(fetched)
                     if not recs:
-                        logger.warning("[PINECONE] fetch returned no records for batch", extra={"batch_ids": batch_ids})
+                        logger.warning("[PINECONE] fetch returned no records for batch", extra={"batch_ids": batch_ids, "fetched_type": type(fetched).__name__})
                     if recs:
                         yield recs
                 except Exception as exc:
