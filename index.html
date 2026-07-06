@@ -50,16 +50,16 @@
   .row>.grow{flex:1;min-width:150px}
   input,select{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--ink);
         border-radius:9px;padding:10px 11px;font-size:13.5px;font-family:var(--sans)}
-  .dropzone{border:1px dashed rgba(255,255,255,.18);border-radius:18px;background:rgba(255,255,255,.02);padding:28px 18px;text-align:center;
-    cursor:pointer;transition:background .15s,border-color .15s;color:var(--dim);min-height:170px;display:flex;flex-direction:column;justify-content:center;gap:10px}
+  .dropzone{border:1px dashed rgba(255,255,255,.18);border-radius:18px;background:rgba(255,255,255,.02);padding:22px 18px;text-align:center;
+    cursor:pointer;transition:background .15s,border-color .15s;color:var(--dim);min-height:120px;display:flex;flex-direction:column;justify-content:center;gap:10px}
   .dropzone:hover,.dropzone.active{background:rgba(93,143,255,.12);border-color:var(--safe);}
-  .dropzone .icon{font-size:26px;display:block;margin:0 auto;color:var(--safe);}
-  .dropzone .title{font-weight:700;color:var(--ink);margin-bottom:4px;font-size:14px}
-  .dropzone .hint{font-size:13px;color:var(--mute)}
-  .dropzone .file-name{font-size:13px;color:var(--ink);opacity:.75}
+  .dropzone .icon{font-size:24px;display:block;margin:0 auto;color:var(--safe);}
+  .dropzone .title{font-weight:700;color:var(--ink);margin-bottom:4px;font-size:13px}
+  .dropzone .hint{font-size:12px;color:var(--mute)}
+  .dropzone .file-name{font-size:12px;color:var(--ink);opacity:.85}
   .hidden-file{display:none}
-  .button-block{display:flex;flex-direction:column;gap:10px;margin-top:12px}
-  .button-block button{width:100%}
+  .button-block{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
+  .button-block button{width:auto;flex:1;min-width:98px;padding:9px 12px;font-size:13px}
   .modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.75);display:none;align-items:center;justify-content:center;z-index:20;padding:10px}
   .modal-backdrop.active{display:flex}
   .modal{background:var(--panel);border:1px solid var(--line);border-radius:16px;max-width:100%;width:min(980px,calc(100% - 40px));max-height:100vh;height:calc(100vh - 20px);overflow:hidden;display:flex;flex-direction:column;box-shadow:0 16px 60px rgba(0,0,0,.45)}
@@ -100,7 +100,7 @@
     <div class="logo"></div>
     <div>
       <h1>AAGCP-<span class="g">Vector</span> · Vector PII Governance</h1>
-      <div class="tag">Connect a production index → find the PII already in it → clean it in place → govern forward</div>
+      <div class="tag">Upload a PDF → connect and scan → clean in place → query, report, and erase</div>
     </div>
   </div>
 </div>
@@ -109,59 +109,9 @@
   <div id="verdict" class="verdict"><span class="dot"></span><span id="vtext">Ready. Connect to begin.</span></div>
 
   <div class="grid">
-    <!-- LEFT: pipeline -->
     <div style="display:flex;flex-direction:column;gap:16px">
       <div class="card">
-        <h2>1 · Connect &amp; Scan</h2>
-        <p class="sub">Connect to a (simulated) production index full of un-redacted PII, then scan it uncapped.</p>
-        <div class="row">
-          <div class="grow">
-            <label>Index size (vectors)</label>
-            <input id="size" type="number" value="120" min="10" max="2000"/>
-          </div>
-          <div style="align-self:flex-end;display:flex;gap:8px">
-            <button class="b-accent" onclick="connect()">Connect</button>
-            <button class="b-ghost" onclick="scan()">Scan</button>
-            <button class="b-safe" onclick="pineconeHealth()">Pinecone Health</button>
-          </div>
-        </div>
-        <div id="healthPanel" class="card" style="margin-top:12px;display:none;">
-          <h2>Pinecone health</h2>
-          <p class="sub">Check connection and show the first 10 chunks.</p>
-          <pre id="healthOut">Press Pinecone Health to check connection.</pre>
-        </div>
-        <div class="stat">
-          <div class="k"><div id="s_total" class="n ink">—</div><div class="l">Vectors</div></div>
-          <div class="k"><div id="s_pii" class="n amber">—</div><div class="l">PII instances</div></div>
-          <div class="k"><div id="s_pct" class="n amber">—</div><div class="l">PII per vector</div></div>
-        </div>
-        <div id="bars" class="bars"></div>
-      </div>
-
-      <div class="card">
-        <h2>2 · Clean in place</h2>
-        <p class="sub">Re-embed the poisoned subset through tokenization. Only affected vectors — no full re-embed.</p>
-        <button class="b-safe" onclick="clean()">Clean the index</button>
-        <div class="stat">
-          <div class="k"><div id="c_re" class="n safe">—</div><div class="l">Re-embedded</div></div>
-          <div class="k"><div id="c_q" class="n ink">—</div><div class="l">Quarantined</div></div>
-          <div class="k"><div id="c_after" class="n safe">—</div><div class="l">PII maksed</div></div>
-        </div>
-      </div>
-
-      <div class="card">
-        <h2>4 · Audit report</h2>
-        <p class="sub">Regulator-ready branded PDF from the current scan.</p>
-        <a class="dl" href="/report.pdf" target="_blank">
-          <button class="b-ghost">⬇ Download PII Audit PDF</button>
-        </a>
-      </div>
-    </div>
-
-    <!-- RIGHT: govern -->
-    <div style="display:flex;flex-direction:column;gap:16px">
-      <div class="card">
-        <h2>Upload PDF</h2>
+        <h2>1 · Upload PDF</h2>
         <p class="sub">Ingest a local PDF file into the index so it can be scanned and queried.</p>
         <div id="pdfDropzone" class="dropzone" onclick="triggerPdfPicker()">
           <div class="icon">⬆</div>
@@ -178,7 +128,41 @@
       </div>
 
       <div class="card">
-        <h2>3 · Query — role decides reveal <span class="pill">same vectors</span></h2>
+        <h2>2 · Connect &amp; Scan</h2>
+        <p class="sub">Connect to a (simulated) production index full of un-redacted PII, then scan it uncapped.</p>
+        <div class="row">
+          <div class="grow">
+            <label>Index size (vectors)</label>
+            <input id="size" type="number" value="120" min="10" max="2000"/>
+          </div>
+          <div style="align-self:flex-end;display:flex;gap:8px">
+            <button class="b-accent" onclick="connect()">Connect</button>
+            <button class="b-ghost" onclick="scan()">Scan</button>
+          </div>
+        </div>
+        <div class="stat">
+          <div class="k"><div id="s_total" class="n ink">—</div><div class="l">Vectors</div></div>
+          <div class="k"><div id="s_pii" class="n amber">—</div><div class="l">PII instances</div></div>
+          <div class="k"><div id="s_pct" class="n amber">—</div><div class="l">PII per vector</div></div>
+        </div>
+        <div id="bars" class="bars"></div>
+      </div>
+
+      <div class="card">
+        <h2>3 · Clean in place</h2>
+        <p class="sub">Re-embed the poisoned subset through tokenization. Only affected vectors — no full re-embed.</p>
+        <button class="b-safe" onclick="clean()">Clean the index</button>
+        <div class="stat">
+          <div class="k"><div id="c_re" class="n safe">—</div><div class="l">Re-embedded</div></div>
+          <div class="k"><div id="c_q" class="n ink">—</div><div class="l">Quarantined</div></div>
+          <div class="k"><div id="c_after" class="n safe">—</div><div class="l">PII masked</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:16px">
+      <div class="card">
+        <h2>4 · Query — role decides reveal <span class="pill">same vectors</span></h2>
         <p class="sub">Before cleaning: raw PII leaks. After cleaning: role-gated rehydration.</p>
         <div class="row">
           <div class="grow">
@@ -202,7 +186,15 @@
       </div>
 
       <div class="card">
-        <h2>Erase — GDPR / DPDP Art. 17</h2>
+        <h2>5 · Audit report</h2>
+        <p class="sub">Regulator-ready branded PDF from the current scan.</p>
+        <a class="dl" href="/report.pdf" target="_blank">
+          <button class="b-ghost">⬇ Download PII Audit PDF</button>
+        </a>
+      </div>
+
+      <div class="card">
+        <h2>6 · Erase — GDPR / DPDP Art. 17</h2>
         <p class="sub">Reference-counted crypto-shred. Erase one subject without harming another who shares an identifier. (Clean first so identities exist.)</p>
         <div class="row">
           <div class="grow"><input id="subject" placeholder="e.g. Ramesh Iyer"/></div>
@@ -315,23 +307,6 @@ async function clean(){V("Cleaning — re-embedding poisoned subset…");const c
   $("s_pii").textContent=c.pii_after; $("s_pct").textContent="0%";
   V(`Cleaned: ${c.reembedded} vectors re-embedded, PII now ${c.pii_after} (was flagged). Retrieval preserved.`,"ok");}
 
-async function pineconeHealth(){
-  V("Checking Pinecone connection…");
-  const r = await call("/pinecone_health","GET");
-  if(r.error){
-    V(`Health check failed: ${r.error}`,'warn');
-    $("healthOut").textContent = `Error: ${r.error}`;
-    $("healthPanel").style.display = "block";
-    return;
-  }
-  $("healthOut").textContent = `Pinecone OK: ${r.ok}\nVectors in index: ${r.count}\n\nTop ${r.top_chunks.length} chunks:\n` +
-    r.top_chunks.map((c,i) =>
-      `#${i+1} ${c.id}\n${c.source_text}\nmetadata: ${JSON.stringify(c.metadata)}\n`
-    ).join("\n");
-  $("healthPanel").style.display = "block";
-  V("Pinecone health OK","ok");
-}
-
 async function query(){
   const role = $("role").value;
   const queryText = $("queryText").value.trim();
@@ -349,23 +324,6 @@ async function query(){
 
   $("qout").textContent = out;
   V(`${role}: ${q.results.length} results · ${q.governed?"governed (role-gated)":"UNGOVERNED (raw PII visible)"}`, q.governed?"ok":"warn");
-}
-
-async function pineconeHealth(){
-  V("Checking Pinecone connection…");
-  const r = await call("/pinecone_health","GET");
-  if(r.error){
-    V(`Health check failed: ${r.error}`,'warn');
-    $("healthOut").textContent = `Error: ${r.error}`;
-    $("healthPanel").style.display = "block";
-    return;
-  }
-  $("healthOut").textContent = `Pinecone OK: ${r.ok}\nVectors in index: ${r.count}\n\nTop ${r.top_chunks.length} chunks:\n` +
-    r.top_chunks.map((c,i) =>
-      `#${i+1} ${c.id}\n${c.source_text}\nmetadata: ${JSON.stringify(c.metadata)}\n`
-    ).join("\n");
-  $("healthPanel").style.display = "block";
-  V("Pinecone health OK","ok");
 }
 
 async function wipeIndex(){
