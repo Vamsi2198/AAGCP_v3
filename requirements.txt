@@ -10,3 +10,4 @@ openai
 # presidio-analyzer   presidio-anonymizer   # global NER (names/addresses)
 # sentence-transformers                      # local embeddings (needs more RAM)
 # qdrant-client | psycopg[binary]            # alternate vector DB connectors
+presidio-analyzer 
