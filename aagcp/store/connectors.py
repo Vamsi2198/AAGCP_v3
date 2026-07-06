@@ -310,7 +310,16 @@ class PineconeConnector(VectorStoreConnector):
                         logger.warning(
                             f"[PINECONE] fetch returned no records for batch ids={len(batch_ids)} fetched_type={type(fetched).__name__} vectors_type={type(vectors).__name__ if vectors is not None else None} vectors_len={len(vectors) if hasattr(vectors, '__len__') else None}"
                         )
-                    if recs:
+                    else:
+                        logger.info(
+                            f"[PINECONE] batch records extracted: batch_ids={len(batch_ids)}, records={len(recs)}, "
+                            f"sample_ids={[r.id for r in recs[:5]]}, "
+                            f"sample_text={[ (r.source_text or '')[:120] for r in recs[:2] ]}"
+                        )
+                        for idx, rec in enumerate(recs[:5], start=1):
+                            logger.debug(
+                                f"[PINECONE] record {idx}: id={rec.id}, source_text={(rec.source_text or '')[:120]}, metadata_keys={list(rec.metadata.keys())}"
+                            )
                         yield recs
                 except Exception as exc:
                     logger.exception("[PINECONE] fetch failed in iter_all", exc_info=exc)

@@ -144,6 +144,24 @@ class Engine:
         
         current_count = self.store.count()
         logger.info(f"[RESET] Complete - {current_count} vectors in index")
+        if current_count:
+            try:
+                first_batch = next(self.store.iter_all(batch=5), [])
+                if first_batch:
+                    logger.info(
+                        "[RESET] First Pinecone batch fetched",
+                        extra={
+                            "batch_size": len(first_batch),
+                            "sample_ids": [r.id for r in first_batch[:5]],
+                            "sample_text": [
+                                (r.source_text or "")[:120] for r in first_batch[:2]
+                            ],
+                        }
+                    )
+                else:
+                    logger.warning("[RESET] iter_all returned no records despite nonzero count")
+            except Exception as exc:
+                logger.exception("[RESET] Failed to fetch first batch from Pinecone", exc_info=exc)
         return {"success": True, "seeded": current_count,
                 "embedder": self.embedder.name,
                 "message": f"Connected to Pinecone index with {current_count} vectors. Embedder: {self.embedder.name}."}

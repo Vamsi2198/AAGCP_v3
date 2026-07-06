@@ -79,6 +79,8 @@ class Scanner:
             if len(chunk) == 0:
                 logger.warning("[SCANNER] store.iter_all returned an empty batch")
 
+            if batch_count == 1:
+                logger.info(f"[SCANNER] First batch content: {chunk}")
             logger.info(f"[SCANNER] Processing batch {batch_count} with {len(chunk)} records")
             
             for rec in chunk:
