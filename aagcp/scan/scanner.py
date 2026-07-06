@@ -70,10 +70,15 @@ class Scanner:
         type_ctr: Counter = Counter()
         juris_ctr: Counter = Counter()
         batch_count = 0
-        logger.info(f"[SCANNER] Connected successfully")
+        logger.info(f"[SCANNER] Connected successfully to store={type(store).__name__}")
+        logger.info(f"[SCANNER] Beginning iteration of store.iter_all(batch={batch})")
 
         for chunk in store.iter_all(batch=batch):
             batch_count += 1
+            logger.info(f"[SCANNER] Received batch {batch_count} from store.iter_all, len={len(chunk)}")
+            if len(chunk) == 0:
+                logger.warning("[SCANNER] store.iter_all returned an empty batch")
+
             logger.info(f"[SCANNER] Processing batch {batch_count} with {len(chunk)} records")
             
             for rec in chunk:
