@@ -136,30 +136,112 @@ class PineconeConnector(VectorStoreConnector):
                     ids.append(item['id'])
         return ids
 
+    def _get_id_and_metadata(self, item):
+        if item is None:
+            return None, {}
+        if isinstance(item, dict):
+            vid = item.get('id')
+            md = item.get('metadata') or item.get('meta') or {}
+        elif isinstance(item, tuple) and len(item) == 2:
+            vid, item_value = item
+            if isinstance(vid, str):
+                md = getattr(item_value, 'metadata', None) or getattr(item_value, 'meta', None) or {}
+            else:
+                vid = None
+                md = {}
+        else:
+            vid = getattr(item, 'id', None)
+            md = getattr(item, 'metadata', None) or getattr(item, 'meta', None) or {}
+        if hasattr(md, 'to_dict'):
+            try:
+                md = md.to_dict()
+            except Exception:
+                md = dict(md or {})
+        elif not isinstance(md, dict):
+            md = dict(md or {})
+        return vid, md
+
     def _extract_records_from_fetch(self, fetched):
         recs = []
         vectors = None
+        payload = None
         if hasattr(fetched, 'vectors'):
             vectors = fetched.vectors
         elif isinstance(fetched, dict):
+            payload = fetched
             vectors = fetched.get('vectors')
+        elif hasattr(fetched, 'to_dict'):
+            payload = fetched.to_dict()
+            vectors = payload.get('vectors')
+        else:
+            vectors = None
+
+        if payload is None and hasattr(fetched, 'to_dict'):
+            payload = fetched.to_dict()
+        if payload is None and isinstance(fetched, dict):
+            payload = fetched
+
+        if vectors is None and isinstance(payload, dict):
+            vectors = payload.get('results') or payload.get('items') or payload.get('vectors')
+            if vectors is None:
+                # Sometimes Pinecone fetch responses are a direct id->vector mapping,
+                # or they are wrapped by namespace. Try to detect a vector dictionary.
+                def looks_like_vector_map(candidate):
+                    if not isinstance(candidate, dict) or not candidate:
+                        return False
+                    sample_vals = list(candidate.values())[:3]
+                    return all(
+                        isinstance(val, dict) or hasattr(val, 'metadata') or hasattr(val, 'values')
+                        for val in sample_vals
+                    )
+
+                if looks_like_vector_map(payload):
+                    vectors = payload
+                elif len(payload) == 1:
+                    nested = next(iter(payload.values()))
+                    if looks_like_vector_map(nested):
+                        vectors = nested
 
         if isinstance(vectors, dict):
             for vid, v in vectors.items():
-                md = dict(v.get("metadata") or {})
-                recs.append(VectorRecord(vid, None,
-                                        md.get("source_text") or md.get("text"),
-                                        md))
-        elif isinstance(vectors, list):
+                item = {'id': vid, 'metadata': getattr(v, 'metadata', None) or (v.get('metadata') if isinstance(v, dict) else None)}
+                vid2, md = self._get_id_and_metadata(item)
+                if vid2 is not None:
+                    recs.append(VectorRecord(vid2, None,
+                                            md.get("source_text") or md.get("text"),
+                                            md))
+        elif hasattr(vectors, 'items') and not isinstance(vectors, list):
+            for vid, v in vectors.items():
+                item = {'id': vid, 'metadata': getattr(v, 'metadata', None) or (v.get('metadata') if isinstance(v, dict) else None)}
+                vid2, md = self._get_id_and_metadata(item)
+                if vid2 is not None:
+                    recs.append(VectorRecord(vid2, None,
+                                            md.get("source_text") or md.get("text"),
+                                            md))
+        elif isinstance(vectors, (list, tuple)):
             for item in vectors:
-                if isinstance(item, dict):
-                    vid = item.get('id')
-                    if vid is None:
-                        continue
-                    md = dict(item.get('metadata') or {})
+                vid, md = self._get_id_and_metadata(item)
+                if vid is not None:
                     recs.append(VectorRecord(vid, None,
                                             md.get("source_text") or md.get("text"),
                                             md))
+        elif vectors is not None:
+            try:
+                for item in list(vectors):
+                    vid, md = self._get_id_and_metadata(item)
+                    if vid is not None:
+                        recs.append(VectorRecord(vid, None,
+                                                md.get("source_text") or md.get("text"),
+                                                md))
+            except Exception:
+                pass
+
+        if not recs:
+            logger.warning("[PINECONE] _extract_records_from_fetch found no records", extra={
+                "fetched_type": type(fetched).__name__,
+                "vectors_type": type(vectors).__name__ if vectors is not None else None,
+                "vectors_len": len(vectors) if hasattr(vectors, '__len__') else None,
+            })
         return recs
 
     def iter_all(self, batch: int = 500):
@@ -193,14 +275,41 @@ class PineconeConnector(VectorStoreConnector):
                         vectors = fetched.get('vectors')
                     elif hasattr(fetched, 'to_dict'):
                         vectors = fetched.to_dict().get('vectors')
-                    logger.info("[PINECONE] fetch response shape", extra={
-                        "fetched_type": type(fetched).__name__,
-                        "vectors_type": type(vectors).__name__ if vectors is not None else None,
-                        "vectors_len": len(vectors) if hasattr(vectors, '__len__') else None,
-                    })
+                    payload = None
+                    if hasattr(fetched, 'to_dict'):
+                        try:
+                            payload = fetched.to_dict()
+                        except Exception:
+                            payload = None
+                    elif isinstance(fetched, dict):
+                        payload = fetched
+
+                    vectors = None
+                    if hasattr(fetched, 'vectors'):
+                        vectors = fetched.vectors
+                    elif isinstance(fetched, dict):
+                        vectors = fetched.get('vectors')
+                    elif payload is not None:
+                        vectors = payload.get('vectors')
+
+                    logger.info(
+                        f"[PINECONE] fetch response shape type={type(fetched).__name__} "
+                        f"payload_type={type(payload).__name__ if payload is not None else None} "
+                        f"vectors_type={type(vectors).__name__ if vectors is not None else None} "
+                        f"vectors_len={len(vectors) if hasattr(vectors, '__len__') else None}"
+                    )
+                    if payload is not None:
+                        logger.debug("[PINECONE] fetch payload sample", extra={
+                            "payload_keys": list(payload.keys()) if isinstance(payload, dict) else None,
+                            "sample_payload": {
+                                k: payload[k] for k in list(payload.keys())[:5]
+                            } if isinstance(payload, dict) else None,
+                        })
                     recs = self._extract_records_from_fetch(fetched)
                     if not recs:
-                        logger.warning("[PINECONE] fetch returned no records for batch", extra={"batch_ids": batch_ids, "fetched_type": type(fetched).__name__})
+                        logger.warning(
+                            f"[PINECONE] fetch returned no records for batch ids={len(batch_ids)} fetched_type={type(fetched).__name__} vectors_type={type(vectors).__name__ if vectors is not None else None} vectors_len={len(vectors) if hasattr(vectors, '__len__') else None}"
+                        )
                     if recs:
                         yield recs
                 except Exception as exc:
