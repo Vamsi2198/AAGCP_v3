@@ -133,6 +133,8 @@ class Engine:
         self.scanner = Scanner(self.detector)
         self._cleaned = False
         self.last_report = None
+        self.last_uploaded_ids: list[str] = []
+        self.last_uploaded_pdf_filename: str | None = None
 
     def reset(self, seed: int = 1) -> dict:
         logger.info(f"[RESET] Resetting engine with seed={seed}")
@@ -143,6 +145,8 @@ class Engine:
         self.vault = PseudonymVault(secret=SECRET)
         self._cleaned = False
         self.last_report = None
+        self.last_uploaded_ids = []
+        self.last_uploaded_pdf_filename = None
         logger.info(f"[RESET] Vault initialized, cleaned=False")
 
         names = set()
@@ -340,6 +344,8 @@ class Engine:
                 self.store.upsert(records[i:i+50])
 
             new_ids = [r.id for r in records]
+            self.last_uploaded_ids = new_ids
+            self.last_uploaded_pdf_filename = filename
             logger.info(f"[UPLOAD] Just upserted {len(new_ids)} ids, first 3: {new_ids[:3]}")
 
             stats_now = self._pinecone_index.describe_index_stats()
@@ -362,6 +368,30 @@ class Engine:
                     "pdf_chunks": len(records), "message": "PDF ingested successfully."}
         except Exception as e:
             logger.error(f"[UPLOAD] Error ingesting PDF: {type(e).__name__}: {e}")
+            raise
+
+    def scan_last_uploaded_pdf(self) -> dict:
+        logger.info("[SCAN_LAST_PDF] Starting scan for the most recently uploaded PDF")
+        if not self.last_uploaded_ids:
+            return {"scanned_vectors": 0, "total_vectors": 0, "vectors_with_pii": 0,
+                    "total_pii_instances": 0, "by_type": {}, "filename": None,
+                    "message": "No PDF has been uploaded yet."}
+
+        try:
+            fetched_records = self.store.fetch(self.last_uploaded_ids)
+            if not fetched_records:
+                return {"scanned_vectors": 0, "total_vectors": 0, "vectors_with_pii": 0,
+                        "total_pii_instances": 0, "by_type": {}, "filename": self.last_uploaded_pdf_filename,
+                        "message": "The uploaded PDF vectors could not be fetched from the store."}
+
+            report = self.scanner.scan_records(fetched_records)
+            self.last_report = report
+            summary = report.summary()
+            summary["filename"] = self.last_uploaded_pdf_filename
+            summary["message"] = f"Scanned {summary['scanned_vectors']} vectors from the last uploaded PDF."
+            return summary
+        except Exception as e:
+            logger.error(f"[SCAN_LAST_PDF] Error: {type(e).__name__}: {e}")
             raise
 
     def wipe_all(self) -> dict:
@@ -542,6 +572,9 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/scan":
                 logger.info(f"[HTTP] /scan endpoint")
                 return self._send(200, STATE.scan())
+            if self.path == "/scan_last_pdf":
+                logger.info(f"[HTTP] /scan_last_pdf endpoint")
+                return self._send(200, STATE.scan_last_uploaded_pdf())
             if self.path == "/query":
                 role = b.get("role", "ANALYST_ROLE")
                 query_text = b.get("query", "patients diagnosed with diabetes")

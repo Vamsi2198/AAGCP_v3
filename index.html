@@ -135,9 +135,10 @@
             <label>Index size (vectors)</label>
             <input id="size" type="number" value="120" min="10" max="2000"/>
           </div>
-          <div style="align-self:flex-end;display:flex;gap:8px">
+          <div style="align-self:flex-end;display:flex;gap:8px;flex-wrap:wrap">
             <button class="b-accent" onclick="connect()">Connect</button>
             <button class="b-ghost" onclick="scan()">Scan</button>
+            <button class="b-ghost" onclick="scanLastPdf()">Scan last PDF</button>
           </div>
         </div>
         <div class="stat">
@@ -230,6 +231,15 @@ async function scan(){V("Scanning uncapped — every vector…");const s=await c
   $("bars").innerHTML=Object.entries(s.by_type||{}).sort((a,b)=>b[1]-a[1]).map(([k,v])=>
     `<div class="bar"><div class="lab">${k}</div><div class="track"><div class="fill" style="width:${100*v/max}%"></div></div><div class="val">${v}</div></div>`).join("");
   V(`Scan complete — ${s.total_pii_instances.toLocaleString()} PII instances across ${s.vectors_with_pii.toLocaleString()} vectors`,"warn");}
+
+async function scanLastPdf(){V("Scanning only the most recently uploaded PDF…");const s=await call("/scan_last_pdf","POST",{});
+  $("s_total").textContent=s.total_vectors.toLocaleString();
+  $("s_pii").textContent=s.total_pii_instances.toLocaleString();
+  $("s_pct").textContent=(s.total_vectors? (s.total_pii_instances/s.total_vectors).toFixed(2):0);
+  const max=Math.max(1,...Object.values(s.by_type||{}));
+  $("bars").innerHTML=Object.entries(s.by_type||{}).sort((a,b)=>b[1]-a[1]).map(([k,v])=>
+    `<div class="bar"><div class="lab">${k}</div><div class="track"><div class="fill" style="width:${100*v/max}%"></div></div><div class="val">${v}</div></div>`).join("");
+  V(s.message || `Scanned ${s.scanned_vectors||0} vectors from the last uploaded PDF`, s.total_pii_instances ? "warn" : "ok");}
 
 let selectedPdfDataUrl = "";
 
