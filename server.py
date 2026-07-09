@@ -160,9 +160,15 @@ def chunk_pdf_bytes(data: bytes, filename: str):
 load_dotenv()
 
 ROOT = Path(__file__).parent
+VAULT_STATE_FILE = ROOT / ".aagcp_vault_state.json"
 SECRET = os.getenv("VAULT_SECRET", b"aagcp-vector-pro-demo-secret32b!").encode() if isinstance(os.getenv("VAULT_SECRET", ""), str) else os.getenv("VAULT_SECRET", b"aagcp-vector-pro-demo-secret32b!")
 ANALYST_PARTIAL = {"AADHAAR": "last4", "IN_PHONE": "last4", "US_SSN": "last4",
                    "CREDIT_CARD": "last4", "US_PHONE": "last4"}
+
+SAFE_METADATA_KEYS = {
+    "chunk", "chunk_type", "doc", "governed", "ingested", "page",
+    "pdf_filename", "record_id", "source", "pii_masked"
+}
 
 FIRST = ["Ramesh","Priya","Arjun","Kavya","Vikram","Ananya","Meera","Sanjay",
          "Divya","Rahul","John","Emma","Liam","Olivia","Noah","Sophia","Aditya","Neha"]
@@ -223,6 +229,17 @@ def _safe_id_component(s: str) -> str:
     return s or "file"
 
 
+def _sanitize_metadata_for_role(metadata: dict, role: str) -> dict:
+    if role == "ANALYST_ROLE":
+        return {}
+    if role == "FINANCE":
+        return {
+            key: value for key, value in (metadata or {}).items()
+            if key in SAFE_METADATA_KEYS and key not in {"source_text", "text"}
+        }
+    return dict(metadata or {})
+
+
 class Engine:
     def __init__(self):
         logger.info("[ENGINE] Initializing Engine...")
@@ -246,7 +263,7 @@ class Engine:
         # immediately seeding it. Use /connect to populate the index only when
         # desired.
         self.store = PineconeConnector(self._pinecone_index)
-        self.vault = PseudonymVault(secret=SECRET)
+        self.vault = PseudonymVault(path=str(VAULT_STATE_FILE), secret=SECRET)
         self.scanner = Scanner(self.detector)
         self._cleaned = False
         self.last_report = None
@@ -259,7 +276,7 @@ class Engine:
         self.store = PineconeConnector(self._pinecone_index)
         logger.info(f"[RESET] PineconeConnector initialized")
         
-        self.vault = PseudonymVault(secret=SECRET)
+        self.vault = PseudonymVault(path=str(VAULT_STATE_FILE), secret=SECRET)
         self._cleaned = False
         self.last_report = None
         self.last_uploaded_ids = []
@@ -566,16 +583,19 @@ class Engine:
             for h in hits:
                 if role == "ANALYST_ROLE":
                     text = ""
+                    source_text = ""
                 elif is_finance:
-                    text = h.get("source_text") or ""
+                    text = h.get("text") or ""
+                    source_text = text
                 else:
                     text = h.get("text") or h.get("source_text") or ""
+                    source_text = h.get("source_text") or text
                 results.append({
                     "id": h["id"],
                     "score": round(h.get("score", 0), 3),
                     "text": text[:220],
-                    "source_text": h.get("source_text") or "",
-                    "metadata": h.get("metadata") or {}
+                    "source_text": source_text[:220],
+                    "metadata": _sanitize_metadata_for_role(h.get("metadata") or {}, role)
                 })
 
             answer = results[0]["text"] if results else ""
@@ -597,6 +617,8 @@ class Engine:
             pii_before = self.last_report.summary()["total_pii_instances"]
             m = Migrator(self.detector, self.vault, self.embedder)
             rep = m.clean(self.store, self.last_report)
+            if self.vault.path:
+                self.vault.save()
             self._cleaned = True
             
             logger.info("[CLEAN] Re-scanning after cleanup...")
@@ -632,6 +654,8 @@ class Engine:
             res = self.vault.crypto_shred_identity(iids[0])
             logger.info(f"[ERASE] Complete - {len(res['tokens_destroyed'])} tokens destroyed, "
                        f"{len(res['tokens_retained_shared'])} retained")
+            if self.vault.path:
+                self.vault.save()
             
             return {"executed": True, "subject": subject,
                     "tokens_destroyed": len(res["tokens_destroyed"]),

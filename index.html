@@ -50,8 +50,8 @@
   .row>.grow{flex:1;min-width:150px}
   input,select{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--ink);
         border-radius:9px;padding:10px 11px;font-size:13.5px;font-family:var(--sans)}
-  .dropzone{border:1px dashed rgba(255,255,255,.18);border-radius:18px;background:rgba(255,255,255,.02);padding:22px 18px;text-align:center;
-    cursor:pointer;transition:background .15s,border-color .15s;color:var(--dim);min-height:120px;display:flex;flex-direction:column;justify-content:center;gap:10px}
+  .dropzone{border:1px dashed rgba(255,255,255,.18);border-radius:18px;background:rgba(255,255,255,.02);padding:14px 18px;text-align:center;
+    cursor:pointer;transition:background .15s,border-color .15s;color:var(--dim);min-height:88px;display:flex;flex-direction:column;justify-content:center;gap:6px}
   .dropzone:hover,.dropzone.active{background:rgba(93,143,255,.12);border-color:var(--safe);}
   .dropzone .icon{font-size:24px;display:block;margin:0 auto;color:var(--safe);}
   .dropzone .title{font-weight:700;color:var(--ink);margin-bottom:4px;font-size:13px}
@@ -332,7 +332,7 @@ async function query(){
     `Metadata: ${esc(JSON.stringify(h.metadata || {}))}`
   ).join("\n\n---\n\n");
 
-  $("qout").textContent = out;
+  $("qout").innerHTML = out.replace(/\n/g, "<br>");
   V(`${role}: ${q.results.length} results · ${q.governed?"governed (role-gated)":"UNGOVERNED (raw PII visible)"}`, q.governed?"ok":"warn");
 }
 
