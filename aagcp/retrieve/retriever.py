@@ -12,8 +12,10 @@ returns identical bytes to every role; the layer decides what is revealed.
 """
 
 from __future__ import annotations
+import math
 import re
 from typing import List, Optional
+from collections import Counter
 
 from ..embed.embedders import EmbedderAdapter
 from ..store.connectors import VectorStoreConnector
@@ -24,6 +26,65 @@ def _toks(s: str) -> List[str]:
     return re.findall(r"[a-z0-9]+", s.lower())
 
 
+def _minmax(vals: List[float]) -> List[float]:
+    if not vals:
+        return []
+    lo = min(vals)
+    hi = max(vals)
+    if hi - lo < 1e-12:
+        return [0.0 for _ in vals]
+    return [(v - lo) / (hi - lo) for v in vals]
+
+def _bm25_scores(query_tokens: List[str], docs_tokens: List[List[str]], k1: float = 1.5, b:float=0.75) -> List[float]:
+    n_docs = len(docs_tokens)
+    if n_docs == 0:
+        return []
+
+    docs_lens = [len(d) for d in docs_tokens]
+    avgdl = (sum(docs_lens)/n_docs) if n_docs else 0.0
+    if avgdl <= 0.0:
+        return [0.0 for _ in docs_tokens]
+    
+    df = Counter()
+    for d in docs_tokens:
+        for t in set(d):
+            df[t] += 1
+
+    q_terms = Counter(query_tokens)
+    scores: List[float] = []
+
+    for d, dl in zip(docs_tokens, docs_lens):
+        tf = Counter(d)
+        score = 0.0
+        denom_norm = k1 * (1.0 - b + b * (dl / avgdl))
+
+        for term, qf in q_terms.items():
+            f = tf.get(term, 0)
+            if f == 0:
+                continue
+
+            n_q = df.get(term, 0)
+            idf = math.log(1.0 + (n_docs - n_q + 0.5) / (n_q + 0.5))
+            score += qf * idf * ((f * (k1 + 1.0)) / (f + denom_norm))
+
+        scores.append(score)
+
+    return scores
+
+
+def _contains_any_token(text: str, tokens: set[str]) -> bool:
+    if not text or not tokens:
+        return False
+    for tok in tokens:
+        if tok in text:
+            return True
+        esc = tok.replace("<", "&lt;").replace(">", "&gt;")
+        if esc in text:
+            return True
+    return False
+
+
+
 class GovernedRetriever:
     def __init__(self, store: VectorStoreConnector, embedder: EmbedderAdapter,
                  vault: PseudonymVault, detector=None):
@@ -32,10 +93,16 @@ class GovernedRetriever:
         self.vault = vault
         self.detector = detector          # to tokenize PII in the query itself
 
-    def query(self, text: str, role_reveal: set, role_partial: dict,
-              k: int = 5, hybrid: bool = False) -> List[dict]:
-        # If the query itself contains PII, tokenize it the SAME way — so a
-        # search for a specific Aadhaar maps to the same token in the corpus.
+    def query(
+        self,
+        text: str,
+        role_reveal: set,
+        role_partial: dict,
+        k: int = 20,                # return top 20 chunks
+        hybrid: bool = True,        # embed + BM25 by default
+        candidate_k: int = 100,     # dense fetch pool for rerank recall
+        dense_weight: float = 0.45, # 0.45 dense + 0.55 lexical
+    ) -> List[dict]:
         q = text
         if self.detector:
             findings = self.detector.scan(text)
@@ -43,21 +110,56 @@ class GovernedRetriever:
                 tok = self.vault.token_for(f)
                 q = q[:f.start] + tok + q[f.end:]
 
-        qvec = self.embedder.embed(q)
-        hits = self.store.query(qvec, k=max(k * 3, k) if hybrid else k)
+        matched_ids = []
+        if hasattr(self.vault, "resolve_identities_by_query"):
+            matched_ids = self.vault.resolve_identities_by_query(text)
+        elif hasattr(self.vault, "resolve_identities_by_name"):
+            matched_ids = self.vault.resolve_identities_by_name(text)
 
-        if hybrid:
-            qset = set(_toks(q))
-            for h in hits:
-                lexical = 0.0
+        matched_tokens: set[str] = set()
+        if hasattr(self.vault, "get_identity_tokens"):
+            for iid in matched_ids:
+                matched_tokens.update(self.vault.get_identity_tokens(iid))
+
+        if matched_tokens:
+            q = f"{q} " + " ".join(sorted(matched_tokens))
+
+        qvec = self.embedder.embed(q)
+        fetch_k = max(candidate_k, k)
+        hits = self.store.query(qvec, k=fetch_k)
+
+        if hybrid and hits:
+            q_tokens = _toks(q)
+            docs_tokens = [_toks(h.get("source_text") or "") for h in hits]
+
+            bm25_raw = _bm25_scores(q_tokens, docs_tokens)
+            dense_raw = [float(h.get("score", 0.0)) for h in hits]
+
+            bm25_norm = _minmax(bm25_raw)
+            dense_norm = _minmax(dense_raw)
+
+            lexical_weight = 1.0 - dense_weight
+            for i, h in enumerate(hits):
                 txt = h.get("source_text") or ""
-                if txt:
-                    tset = set(_toks(txt))
-                    lexical = len(qset & tset) / max(len(qset), 1)
-                h["score"] = 0.7 * h["score"] + 0.3 * lexical
+                vault_boost = 0.35 if _contains_any_token(txt, matched_tokens) else 0.0
+                h["dense_score"] = dense_raw[i]
+                h["bm25_score"] = bm25_raw[i]
+                h["vault_boost"] = vault_boost
+                h["score"] = (
+                    dense_weight * dense_norm[i]
+                    + lexical_weight * bm25_norm[i]
+                    + vault_boost
+                )
+
             hits = sorted(hits, key=lambda x: -x["score"])[:k]
+        else:
+            hits = hits[:k]
 
         for h in hits:
-            h["text"] = self.vault.rehydrate(h.get("source_text") or "",
-                                             role_reveal, role_partial)
+            h["text"] = self.vault.rehydrate(
+                h.get("source_text") or "",
+                role_reveal,
+                role_partial,
+            )
+
         return hits

@@ -39,6 +39,123 @@ from aagcp.migrate.migrator import Migrator
 from aagcp.retrieve.retriever import GovernedRetriever
 from aagcp.report.pdf import build_audit_pdf
 
+
+RECORD_HEADER_PATTERNS = [
+    ("hash_id", re.compile(r"(?=#\d{3,6}\s*(?:Name)?:?)")),
+    ("subj_id", re.compile(r"(?=Subj\s+\d{3,6}\b)")),
+    ("row_id", re.compile(r"(?=Row\s+\d{3,6}\b)")),
+]
+JSON_LINE_PATTERN = re.compile(r"^\s*\{.*\}\s*,?\s*$")
+
+
+def looks_like_json_lines(text: str) -> bool:
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return False
+    json_like = sum(1 for line in lines if JSON_LINE_PATTERN.match(line))
+    return json_like >= max(1, len(lines) // 2)
+
+
+def chunk_json_lines(text: str, doc_name: str, page_num: int):
+    chunks = []
+    for line in text.splitlines():
+        line = line.strip().rstrip(",")
+        if not line or not (line.startswith("{") and line.endswith("}")):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        record_id = obj.get("user_id") or obj.get("id")
+        chunks.append({
+            "doc": doc_name,
+            "page": page_num,
+            "chunk_type": "json_line",
+            "record_id": record_id,
+            "text": line,
+        })
+    return chunks
+
+
+def chunk_by_header_pattern(text: str, doc_name: str, page_num: int):
+    for pattern_name, pattern in RECORD_HEADER_PATTERNS:
+        pieces = pattern.split(text)
+        pieces = [piece.strip() for piece in pieces if piece.strip()]
+        if len(pieces) > 1:
+            chunks = []
+            for piece in pieces:
+                id_match = re.match(r"#?(\d{3,6})", piece)
+                chunks.append({
+                    "doc": doc_name,
+                    "page": page_num,
+                    "chunk_type": f"header:{pattern_name}",
+                    "record_id": id_match.group(1) if id_match else None,
+                    "text": piece,
+                })
+            return chunks
+    return None
+
+
+def chunk_table_rows(page, doc_name: str, page_num: int):
+    tables = page.extract_tables()
+    if not tables:
+        return None
+    all_chunks = []
+    for t_idx, table in enumerate(tables):
+        if not table or len(table) < 2:
+            continue
+        header = [(c or "").strip() for c in table[0]]
+        for r_idx, row in enumerate(table[1:], start=1):
+            row = [(c or "").strip() for c in row]
+            if not any(row):
+                continue
+            pairs = [f"{h}: {v}" for h, v in zip(header, row) if v]
+            row_text = " | ".join(pairs)
+            all_chunks.append({
+                "doc": doc_name,
+                "page": page_num,
+                "chunk_type": "table_row",
+                "record_id": f"table{t_idx}_row{r_idx}",
+                "text": row_text,
+            })
+    return all_chunks or None
+
+
+def chunk_page(page, doc_name: str, page_num: int):
+    text = page.extract_text() or ""
+    if looks_like_json_lines(text):
+        chunks = chunk_json_lines(text, doc_name, page_num)
+        if chunks:
+            return chunks
+
+    chunks = chunk_by_header_pattern(text, doc_name, page_num)
+    if chunks:
+        return chunks
+
+    chunks = chunk_table_rows(page, doc_name, page_num)
+    if chunks:
+        return chunks
+
+    if text.strip():
+        return [{
+            "doc": doc_name,
+            "page": page_num,
+            "chunk_type": "full_page_fallback",
+            "record_id": None,
+            "text": text.strip(),
+        }]
+    return []
+
+
+def chunk_pdf_bytes(data: bytes, filename: str):
+    doc_name = Path(filename).name
+    all_chunks = []
+    import pdfplumber
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        for page_num, page in enumerate(pdf.pages, start=1):
+            all_chunks.extend(chunk_page(page, doc_name, page_num))
+    return all_chunks
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -307,37 +424,41 @@ class Engine:
         logger.info(f"[UPLOAD] Ingesting PDF file: {filename}")
         try:
             data = base64.b64decode(content_b64)
-            import pdfplumber
-            with pdfplumber.open(io.BytesIO(data)) as pdf:
-                chunks = []
-                for page_number, page in enumerate(pdf.pages, start=1):
-                    page_text = page.extract_text() or ""
-                    if not page_text.strip():
-                        continue
-                    paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", page_text) if p.strip()]
-                    for paragraph_index, paragraph in enumerate(paragraphs, start=1):
-                        for chunk_index, chunk in enumerate(_chunk_text(paragraph), start=1):
-                            chunks.append((page_number, paragraph_index, chunk_index, chunk))
+            chunk_items = chunk_pdf_bytes(data, filename)
 
-            if not chunks:
+            if not chunk_items:
                 return {"uploaded": 0, "message": "No text could be extracted from the PDF."}
 
             records = []
             safe_stem = _safe_id_component(Path(filename).stem)
-            for page_number, paragraph_index, chunk_index, chunk in chunks:
-                record_id = (f"pdf:{safe_stem}:{page_number:03d}:"
-                             f"{paragraph_index:03d}:{chunk_index:03d}")
+            for chunk_index, chunk_item in enumerate(chunk_items, start=1):
+                text = chunk_item.get("text", "").strip()
+                if not text:
+                    continue
+                record_id = (f"pdf:{safe_stem}:{chunk_item.get('page', 0):03d}:"
+                             f"{chunk_index:03d}:{chunk_item.get('chunk_type','chunk')}")
                 logger.info(f"[UPLOAD] record_id={record_id!r}")
+                # Build metadata but omit keys with None values to avoid
+                # sending nulls to Pinecone (which rejects null metadata values).
+                metadata = {
+                    "source": "pdf",
+                    "pdf_filename": filename,
+                    "page": chunk_item.get("page", 0),
+                    "chunk_type": chunk_item.get("chunk_type", "full_page_fallback"),
+                    "ingested": "pdf_upload"
+                }
+                # Only include record_id and doc when they are non-null.
+                rid = chunk_item.get("record_id")
+                if rid is not None:
+                    metadata["record_id"] = str(rid)
+                docv = chunk_item.get("doc")
+                if docv is not None:
+                    metadata["doc"] = docv
                 records.append(VectorRecord(
                     record_id,
-                    self.embedder.embed(chunk),
-                    chunk,
-                    {"source": "pdf",
-                     "pdf_filename": filename,
-                     "page": page_number,
-                     "paragraph": paragraph_index,
-                     "chunk": chunk_index,
-                     "ingested": "pdf_upload"}
+                    self.embedder.embed(text),
+                    text,
+                    metadata
                 ))
 
             for i in range(0, len(records), 50):
@@ -430,7 +551,15 @@ class Engine:
             
             ret = GovernedRetriever(self.store, self.embedder, self.vault,
                                     detector=self.detector if gov else None)
-            hits = ret.query(query_text, reveal, partial, k=3)
+            hits = ret.query(
+                query_text,
+                reveal,
+                partial,
+                k=20,
+                hybrid=True,
+                candidate_k=20,
+                dense_weight=0.7,
+            )
             logger.info(f"[QUERY] Retrieved {len(hits)} results")
 
             results = []

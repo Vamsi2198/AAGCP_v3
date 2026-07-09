@@ -55,6 +55,40 @@ class PseudonymVault:
         return [i for i, names in self._idnames.items()
                 if any(n == dn.strip().lower() for dn in names)]
 
+    def get_identity_tokens(self, identity_id: str) -> List[str]:
+        return sorted(self._identities.get(identity_id, set()))
+
+    def resolve_identities_by_query(self, text: str) -> List[str]:
+        q = re.sub(r"\s+", " ", text.strip().lower())
+        if not q:
+            return []
+
+        exact = []
+        for iid, names in self._idnames.items():
+            for dn in names:
+                n = re.sub(r"\s+", " ", dn.strip().lower())
+                if q == n:
+                    exact.append(iid)
+                    break
+        if exact:
+            return sorted(set(exact))
+
+        q_tokens = set(re.findall(r"[a-z0-9]+", q))
+        if not q_tokens:
+            return []
+
+        scored = []
+        for iid, names in self._idnames.items():
+            best_overlap = 0
+            for dn in names:
+                n_tokens = set(re.findall(r"[a-z0-9]+", dn.lower()))
+                best_overlap = max(best_overlap, len(q_tokens & n_tokens))
+            if best_overlap >= 2 or (len(q_tokens) == 1 and best_overlap == 1):
+                scored.append((best_overlap, iid))
+
+        scored.sort(key=lambda x: (-x[0], x[1]))
+        return [iid for _, iid in scored]
+
     def crypto_shred_identity(self, iid: str) -> dict:
         tokens = self._identities.pop(iid, set())
         self._idnames.pop(iid, None)

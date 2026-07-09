@@ -86,15 +86,21 @@ class InMemoryConnector(VectorStoreConnector):
             self._data[r.id] = r
 
     def query(self, vector, k=5, where=None):
+        qn = np.linalg.norm(vector)
+        q = vector / qn if qn > 0 else vector
+
         rows = []
         for r in self._data.values():
             if r.vector is None:
                 continue
             if where and not all(r.metadata.get(kk) == vv for kk, vv in where.items()):
                 continue
-            sim = float(np.dot(vector, r.vector))
+            rn = np.linalg.norm(r.vector)
+            if rn == 0:
+                continue
+            sim = float(np.dot(q, r.vector / rn))  # true cosine similarity
             rows.append({"id": r.id, "score": sim,
-                         "source_text": r.source_text, "metadata": r.metadata})
+                        "source_text": r.source_text, "metadata": r.metadata})
         return sorted(rows, key=lambda x: -x["score"])[:k]
 
     def delete(self, ids):
@@ -118,6 +124,8 @@ class PineconeConnector(VectorStoreConnector):
         self._ix = index
         self._ns = namespace
         logger.info(f"[PINECONE] Connector initialized with namespace='{namespace}'")
+        # Pinecone fetch uses query params; large ID lists can trip 414 URI limits.
+        self._fetch_id_chunk_size = 50
 
     def count(self):
         return int(self._ix.describe_index_stats().get("total_vector_count", 0))
@@ -324,73 +332,48 @@ class PineconeConnector(VectorStoreConnector):
         if not all_ids:
             logger.warning("[PINECONE] iter_all found no IDs from list()")
 
-        # Fetch actual vectors in batches and yield
+        # Fetch actual vectors in batches and yield.
+        # Each fetch is further split to avoid 414 Request-URI Too Large.
         for i in range(0, len(all_ids), batch):
             batch_ids = all_ids[i:i + batch]
             if batch_ids:
-                try:
-                    fetched = self._ix.fetch(ids=batch_ids, namespace=self._ns if self._ns else None)
-                    vectors = None
-                    if hasattr(fetched, 'vectors'):
-                        vectors = fetched.vectors
-                    elif isinstance(fetched, dict):
-                        vectors = fetched.get('vectors')
-                    elif hasattr(fetched, 'to_dict'):
-                        vectors = fetched.to_dict().get('vectors')
-                    payload = None
-                    if hasattr(fetched, 'to_dict'):
-                        try:
-                            payload = fetched.to_dict()
-                        except Exception:
-                            payload = None
-                    elif isinstance(fetched, dict):
-                        payload = fetched
+                recs_batch = []
+                for j in range(0, len(batch_ids), self._fetch_id_chunk_size):
+                    sub_ids = batch_ids[j:j + self._fetch_id_chunk_size]
+                    try:
+                        fetched = self._ix.fetch(ids=sub_ids, namespace=self._ns if self._ns else None)
+                        vectors = None
+                        if hasattr(fetched, 'vectors'):
+                            vectors = fetched.vectors
+                        elif isinstance(fetched, dict):
+                            vectors = fetched.get('vectors')
 
-                    vectors = None
-                    if hasattr(fetched, 'vectors'):
-                        vectors = fetched.vectors
-                    elif isinstance(fetched, dict):
-                        vectors = fetched.get('vectors')
-                    elif payload is not None:
-                        vectors = payload.get('vectors')
-
-                    logger.info(
-                        f"[PINECONE] fetch response shape type={type(fetched).__name__} "
-                        f"payload_type={type(payload).__name__ if payload is not None else None} "
-                        f"vectors_type={type(vectors).__name__ if vectors is not None else None} "
-                        f"vectors_len={len(vectors) if hasattr(vectors, '__len__') else None}"
-                    )
-                    if payload is not None:
-                        logger.debug("[PINECONE] fetch payload sample", extra={
-                            "payload_keys": list(payload.keys()) if isinstance(payload, dict) else None,
-                            "sample_payload": {
-                                k: payload[k] for k in list(payload.keys())[:5]
-                            } if isinstance(payload, dict) else None,
-                        })
-                    recs = self._extract_records_from_fetch(fetched)
-                    if not recs:
-                        logger.warning(
-                            f"[PINECONE] fetch returned no records for batch ids={len(batch_ids)} fetched_type={type(fetched).__name__} vectors_type={type(vectors).__name__ if vectors is not None else None} vectors_len={len(vectors) if hasattr(vectors, '__len__') else None}"
-                        )
-                    else:
-                        logger.info(
-                            f"[PINECONE] batch records extracted: batch_ids={len(batch_ids)}, records={len(recs)}, "
-                            f"sample_ids={[r.id for r in recs[:5]]}, "
-                            f"sample_text={[ (r.source_text or '')[:120] for r in recs[:2] ]}"
-                        )
-                        for idx, rec in enumerate(recs[:5], start=1):
-                            logger.debug(
-                                f"[PINECONE] record {idx}: id={rec.id}, source_text={(rec.source_text or '')[:120]}, metadata_keys={list(rec.metadata.keys())}"
+                        recs = self._extract_records_from_fetch(fetched)
+                        if not recs:
+                            logger.warning(
+                                "[PINECONE] fetch returned no records",
+                                extra={
+                                    "sub_ids": len(sub_ids),
+                                    "fetched_type": type(fetched).__name__,
+                                    "vectors_type": type(vectors).__name__ if vectors is not None else None,
+                                    "vectors_len": len(vectors) if hasattr(vectors, '__len__') else None,
+                                }
                             )
-                        yield recs
-                except Exception as exc:
-                    logger.exception("[PINECONE] fetch failed in iter_all", exc_info=exc)
-                    continue
+                        else:
+                            recs_batch.extend(recs)
+                    except Exception as exc:
+                        logger.exception("[PINECONE] fetch failed in iter_all", exc_info=exc)
+                        continue
+
+                if recs_batch:
+                    yield recs_batch
 
     def fetch(self, ids):
         out = []
-        fetched = self._ix.fetch(ids=ids, namespace=self._ns)
-        out.extend(self._extract_records_from_fetch(fetched))
+        for i in range(0, len(ids), self._fetch_id_chunk_size):
+            sub_ids = ids[i:i + self._fetch_id_chunk_size]
+            fetched = self._ix.fetch(ids=sub_ids, namespace=self._ns)
+            out.extend(self._extract_records_from_fetch(fetched))
         return out
 
     def upsert(self, records):
