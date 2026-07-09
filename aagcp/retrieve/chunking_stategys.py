@@ -13,8 +13,7 @@ Strategy:
   3. If no header marker matches, but pdfplumber found a table on that page,
      chunk by table row instead (each row -> one chunk, header row attached
      as context so the chunk is self-describing).
-  4. If neither applies (e.g. a JSON-lines block), split on line-level JSON
-     object boundaries.
+  4. If neither applies, check for JSON-lines format (>=50% lines are valid JSON objects).
   5. Every chunk carries metadata: doc name, page number, chunk type,
      record id (if detected), and the source pattern used - useful for
      filtering/citation at retrieval time.
@@ -25,7 +24,10 @@ Install:
 
 import re
 import json
+import logging
 import pdfplumber
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -38,35 +40,89 @@ RECORD_HEADER_PATTERNS = [
     ("row_id",    re.compile(r"(?=Row\s+\d{3,6}\b)")),           # generic "Row NNN"
 ]
 
-JSON_LINE_PATTERN = re.compile(r"^\s*\{.*\}\s*,?\s*$")
+JSON_LINE_PATTERN = re.compile(r"^\s*\{.*\}\s*,?\s*$", re.MULTILINE)
 
 
 def looks_like_json_lines(text: str) -> bool:
-    lines = [l for l in text.splitlines() if l.strip()]
+    """Check if text is JSONL format: >=50% of non-empty lines are valid JSON objects."""
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
     if not lines:
         return False
-    json_like = sum(1 for l in lines if JSON_LINE_PATTERN.match(l))
-    return json_like >= max(1, len(lines) // 2)
+    
+    json_count = 0
+    for line in lines:
+        # Remove trailing comma (common in JSONL)
+        line = line.rstrip(",")
+        if not (line.startswith("{") and line.endswith("}")):
+            continue
+        try:
+            json.loads(line)
+            json_count += 1
+        except (json.JSONDecodeError, ValueError):
+            pass
+    
+    ratio = json_count / len(lines) if lines else 0
+    is_jsonl = ratio >= 0.5
+    logger.info(f"[CHUNKING] JSON-lines detection: {json_count}/{len(lines)} valid = {ratio:.1%} → {is_jsonl}")
+    return is_jsonl
 
 
 def chunk_json_lines(text, doc_name, page_num):
+    """Split JSONL into one chunk per record. Handles both single-line and 
+    multi-line JSON objects (when formatted with newlines inside braces)."""
     chunks = []
+    
+    # Try single-line-per-object first (most common JSONL)
+    chunks_by_line = []
     for line in text.splitlines():
         line = line.strip().rstrip(",")
         if not line or not (line.startswith("{") and line.endswith("}")):
             continue
         try:
             obj = json.loads(line)
+            record_id = obj.get("user_id") or obj.get("id") or obj.get("name")
+            chunks_by_line.append({
+                "doc": doc_name,
+                "page": page_num,
+                "chunk_type": "json_line",
+                "record_id": record_id,
+                "text": line,
+            })
         except json.JSONDecodeError:
-            continue
-        record_id = obj.get("user_id") or obj.get("id")
-        chunks.append({
-            "doc": doc_name,
-            "page": page_num,
-            "chunk_type": "json_line",
-            "record_id": record_id,
-            "text": line,
-        })
+            pass
+    
+    if chunks_by_line:
+        logger.info(f"[CHUNKING] Split {len(chunks_by_line)} JSON-line objects (single-line format)")
+        return chunks_by_line
+    
+    # Fallback: multi-line JSON objects (find brace-balanced blocks)
+    buffer = ""
+    brace_depth = 0
+    for line in text.splitlines():
+        buffer += line + "\n"
+        brace_depth += line.count("{") - line.count("}")
+        
+        # When braces balance at 0, we have a complete JSON object
+        if brace_depth == 0 and "{" in buffer:
+            obj_text = buffer.strip().rstrip(",")
+            try:
+                obj = json.loads(obj_text)
+                record_id = obj.get("user_id") or obj.get("id") or obj.get("name")
+                chunks.append({
+                    "doc": doc_name,
+                    "page": page_num,
+                    "chunk_type": "json_line_multiline",
+                    "record_id": record_id,
+                    "text": obj_text,
+                })
+                logger.debug(f"[CHUNKING] Parsed multi-line JSON record: {record_id}")
+            except json.JSONDecodeError as e:
+                logger.warning(f"[CHUNKING] Failed to parse multi-line JSON: {e}")
+            buffer = ""
+    
+    if chunks:
+        logger.info(f"[CHUNKING] Split {len(chunks)} JSON-line objects (multi-line format)")
+    
     return chunks
 
 
@@ -123,24 +179,28 @@ def chunk_table_rows(page, doc_name, page_num):
 def chunk_page(page, doc_name, page_num):
     text = page.extract_text() or ""
 
-    # 1. JSON-line records
+    # 1. JSON-line records (JSONL streams)
     if looks_like_json_lines(text):
         chunks = chunk_json_lines(text, doc_name, page_num)
         if chunks:
+            logger.info(f"[CHUNKING] Page {page_num}: JSONL strategy → {len(chunks)} chunks")
             return chunks
 
     # 2. Header-marker records (#0001, Subj 001, etc.)
     chunks = chunk_by_header_pattern(text, doc_name, page_num)
     if chunks:
+        logger.info(f"[CHUNKING] Page {page_num}: Header-marker strategy → {len(chunks)} chunks")
         return chunks
 
     # 3. Plain table rows (no per-row header marker)
     chunks = chunk_table_rows(page, doc_name, page_num)
     if chunks:
+        logger.info(f"[CHUNKING] Page {page_num}: Table-row strategy → {len(chunks)} chunks")
         return chunks
 
     # 4. Nothing recognized -> whole page as one chunk (rare fallback)
     if text.strip():
+        logger.warning(f"[CHUNKING] Page {page_num}: No pattern matched, using full_page_fallback (1 chunk)")
         return [{
             "doc": doc_name,
             "page": page_num,
