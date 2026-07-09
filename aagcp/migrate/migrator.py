@@ -64,7 +64,7 @@ class Migrator:
         if not findings:
             return text, 0
         # choose canonical identity for this record
-        canon = min(findings, key=lambda f: self._STRENGTH.get(f.entity_type, 4))
+        canon = min(findings, key=lambda f: self.IDENTITY_STRENGTH.get(f.entity_type, 4))
         identity_id = f"{canon.entity_type}:{canon.value.strip().lower()}"
         
         # Collect all display names: person name + all strong identifiers (phone, email, MRN, etc)
@@ -74,7 +74,7 @@ class Migrator:
             display_names.add(person_name)
         # Add all identifiers with strength <= 3 (strong ones: AADHAAR, PAN, MRN, PHONE, EMAIL)
         for f in findings:
-            if self._STRENGTH.get(f.entity_type, 4) <= 3:
+            if self.IDENTITY_STRENGTH.get(f.entity_type, 4) <= 3:
                 display_names.add(f.value)
 
         masked = text

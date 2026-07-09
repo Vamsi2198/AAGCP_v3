@@ -49,16 +49,59 @@ JSON_LINE_PATTERN = re.compile(r"^\s*\{.*\}\s*,?\s*$")
 
 
 def looks_like_json_lines(text: str) -> bool:
-    lines = [line for line in text.splitlines() if line.strip()]
+    """Detect if text is JSON-lines format, handling multi-line JSON records from PDFs."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         return False
-    json_like = sum(1 for line in lines if JSON_LINE_PATTERN.match(line))
-    return json_like >= max(1, len(lines) // 2)
+    
+    # Reconstruct JSON objects that span multiple lines
+    # If a line doesn't start with {, it's a continuation of the previous record
+    reconstructed = []
+    current = ""
+    for line in lines:
+        if current and not line.startswith("{"):
+            # Continuation of previous JSON record (split across PDF text operations)
+            current += " " + line
+            if line.endswith("}") or line.endswith("},"):
+                reconstructed.append(current)
+                current = ""
+        else:
+            if current:
+                reconstructed.append(current)
+            current = line
+    if current:
+        reconstructed.append(current)
+    
+    # Now check how many look like complete JSON
+    json_like = sum(1 for line in reconstructed if JSON_LINE_PATTERN.match(line))
+    is_jsonl = json_like >= max(1, len(reconstructed) // 2) if reconstructed else False
+    return is_jsonl
 
 
 def chunk_json_lines(text: str, doc_name: str, page_num: int):
+    """Extract JSON-line records, reconstructing those split across PDF text operations."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    
+    # Reconstruct JSON objects that span multiple lines
+    # If a line doesn't start with {, it's a continuation of the previous record
+    reconstructed = []
+    current = ""
+    for line in lines:
+        if current and not line.startswith("{"):
+            # Continuation of previous JSON record
+            current += " " + line
+            if line.endswith("}") or line.endswith("},"):
+                reconstructed.append(current)
+                current = ""
+        else:
+            if current:
+                reconstructed.append(current)
+            current = line
+    if current:
+        reconstructed.append(current)
+    
     chunks = []
-    for line in text.splitlines():
+    for line in reconstructed:
         line = line.strip().rstrip(",")
         if not line or not (line.startswith("{") and line.endswith("}")):
             continue
@@ -126,17 +169,21 @@ def chunk_page(page, doc_name: str, page_num: int):
     if looks_like_json_lines(text):
         chunks = chunk_json_lines(text, doc_name, page_num)
         if chunks:
+            logger.info(f"[CHUNKING] Page {page_num}: JSON-lines strategy -> {len(chunks)} chunks")
             return chunks
 
     chunks = chunk_by_header_pattern(text, doc_name, page_num)
     if chunks:
+        logger.info(f"[CHUNKING] Page {page_num}: Header-marker strategy -> {len(chunks)} chunks")
         return chunks
 
     chunks = chunk_table_rows(page, doc_name, page_num)
     if chunks:
+        logger.info(f"[CHUNKING] Page {page_num}: Table-row strategy -> {len(chunks)} chunks")
         return chunks
 
     if text.strip():
+        logger.info(f"[CHUNKING] Page {page_num}: full_page_fallback (1 chunk, {len(text)} chars)")
         return [{
             "doc": doc_name,
             "page": page_num,
