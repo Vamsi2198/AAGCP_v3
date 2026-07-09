@@ -128,7 +128,15 @@
       </div>
 
       <div class="card">
-        <h2>2 · Connect &amp; Scan</h2>
+        <h2>2 · Audit report</h2>
+        <p class="sub">Regulator-ready branded PDF from the current scan.</p>
+        <a class="dl" href="/report.pdf" target="_blank">
+          <button class="b-ghost">⬇ Download PII Audit PDF</button>
+        </a>
+      </div>
+
+      <div class="card">
+        <h2>3 · Connect &amp; Scan</h2>
         <p class="sub">Connect to a (simulated) production index full of un-redacted PII, then scan it uncapped.</p>
         <div class="row">
           <div class="grow">
@@ -138,7 +146,7 @@
           <div style="align-self:flex-end;display:flex;gap:8px;flex-wrap:wrap">
             <button class="b-accent" onclick="connect()">Connect</button>
             <button class="b-ghost" onclick="scan()">Scan</button>
-            <button class="b-ghost" onclick="scanLastPdf()">Scan last PDF</button>
+            <button class="b-ghost" onclick="scanLastPdf()">Scan latest PDF</button>
           </div>
         </div>
         <div class="stat">
@@ -150,9 +158,9 @@
       </div>
 
       <div class="card">
-        <h2>3 · Clean in place</h2>
+        <h2>4 · Clean in place</h2>
         <p class="sub">Re-embed the poisoned subset through tokenization. Only affected vectors — no full re-embed.</p>
-        <button class="b-safe" onclick="clean()">Clean the index</button>
+        <button class="b-safe" onclick="clean()">Clean the pdf/index</button>
         <div class="stat">
           <div class="k"><div id="c_re" class="n safe">—</div><div class="l">Re-embedded</div></div>
           <div class="k"><div id="c_q" class="n ink">—</div><div class="l">Quarantined</div></div>
@@ -163,7 +171,7 @@
 
     <div style="display:flex;flex-direction:column;gap:16px">
       <div class="card">
-        <h2>4 · Query — role decides reveal <span class="pill">same vectors</span></h2>
+        <h2>5 · Query — role decides reveal <span class="pill">same vectors</span></h2>
         <p class="sub">Before cleaning: raw PII leaks. After cleaning: role-gated rehydration.</p>
         <div class="row">
           <div class="grow">
@@ -184,14 +192,6 @@
           </div>
         </div>
         <pre id="qout">Run a query to see results.</pre>
-      </div>
-
-      <div class="card">
-        <h2>5 · Audit report</h2>
-        <p class="sub">Regulator-ready branded PDF from the current scan.</p>
-        <a class="dl" href="/report.pdf" target="_blank">
-          <button class="b-ghost">⬇ Download PII Audit PDF</button>
-        </a>
       </div>
 
       <div class="card">
