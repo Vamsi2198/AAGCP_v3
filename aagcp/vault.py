@@ -70,7 +70,7 @@ class PseudonymVault:
         exact = [i for i, names in self._idnames.items()
                  if any(n == re.sub(r"\s+", " ", dn.strip().lower()) for dn in names)]
         if exact:
-            logger.info(f"[VAULT] Exact name match for '{name}' → {exact}")
+            logger.info(f"[VAULT] Exact name match for '{name}' -> {exact}")
             return sorted(set(exact))
         
         # 1b) phone/email normalized match (e.g., "4382 9306 7067" matches "+1 (438) 293-06 7067")
@@ -78,7 +78,7 @@ class PseudonymVault:
             norm_exact = [i for i, names in self._idnames.items()
                          if any(n_norm == _normalize_identifier(dn) for dn in names)]
             if norm_exact:
-                logger.info(f"[VAULT] Normalized identifier match for '{name}' → {norm_exact}")
+                logger.info(f"[VAULT] Normalized identifier match for '{name}' -> {norm_exact}")
                 return sorted(set(norm_exact))
         
         # 2) fallback: query is a substring of a stored name, or shares all its
@@ -94,7 +94,7 @@ class PseudonymVault:
                     break
         
         if partial:
-            logger.info(f"[VAULT] Partial match for '{name}' → {partial[:3]}")
+            logger.info(f"[VAULT] Partial match for '{name}' -> {partial[:3]}")
         else:
             logger.warning(f"[VAULT] No identity found for query '{name}'")
         

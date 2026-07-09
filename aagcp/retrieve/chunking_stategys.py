@@ -63,7 +63,7 @@ def looks_like_json_lines(text: str) -> bool:
     
     ratio = json_count / len(lines) if lines else 0
     is_jsonl = ratio >= 0.5
-    logger.info(f"[CHUNKING] JSON-lines detection: {json_count}/{len(lines)} valid = {ratio:.1%} → {is_jsonl}")
+    logger.info(f"[CHUNKING] JSON-lines detection: {json_count}/{len(lines)} valid = {ratio:.1%} -> {is_jsonl}")
     return is_jsonl
 
 
@@ -183,19 +183,19 @@ def chunk_page(page, doc_name, page_num):
     if looks_like_json_lines(text):
         chunks = chunk_json_lines(text, doc_name, page_num)
         if chunks:
-            logger.info(f"[CHUNKING] Page {page_num}: JSONL strategy → {len(chunks)} chunks")
+            logger.info(f"[CHUNKING] Page {page_num}: JSONL strategy -> {len(chunks)} chunks")
             return chunks
 
     # 2. Header-marker records (#0001, Subj 001, etc.)
     chunks = chunk_by_header_pattern(text, doc_name, page_num)
     if chunks:
-        logger.info(f"[CHUNKING] Page {page_num}: Header-marker strategy → {len(chunks)} chunks")
+        logger.info(f"[CHUNKING] Page {page_num}: Header-marker strategy -> {len(chunks)} chunks")
         return chunks
 
     # 3. Plain table rows (no per-row header marker)
     chunks = chunk_table_rows(page, doc_name, page_num)
     if chunks:
-        logger.info(f"[CHUNKING] Page {page_num}: Table-row strategy → {len(chunks)} chunks")
+        logger.info(f"[CHUNKING] Page {page_num}: Table-row strategy -> {len(chunks)} chunks")
         return chunks
 
     # 4. Nothing recognized -> whole page as one chunk (rare fallback)
