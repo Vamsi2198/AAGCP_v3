@@ -574,8 +574,8 @@ class Engine:
                 partial,
                 k=20,
                 hybrid=True,
-                candidate_k=20,
-                dense_weight=0.7,
+                candidate_k=100,
+                dense_weight=0.45,
             )
             logger.info(f"[QUERY] Retrieved {len(hits)} results")
 

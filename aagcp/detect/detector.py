@@ -16,6 +16,7 @@ however many exist.
 """
 
 from __future__ import annotations
+import re
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -29,7 +30,7 @@ class Finding:
     start: int
     end: int
     confidence: float
-    source: str          # "regex" | "presidio"
+    source: str          # "regex" | "presidi_cue_nameso"
     jurisdiction: str = ""
 
 
@@ -59,6 +60,27 @@ class PIIDetector:
 
     # ── Detection ────────────────────────────────────────────────────
 
+    # Structural name cues common in records: "Name: X Y", "Patient X Y",
+    # "Subject ... X Y", honorifics. Catches names in UPLOADED docs even with
+    # no lexicon and no Presidio, so erase-by-name and name-query both work.
+    _NAME_CUE = re.compile(
+        r"(?:(?:Full\s+)?Name|Patient|Subject|Member|Employee|Cardholder|Enrollee|Holder|Investigator|Steward)"
+        r"\s*[:\-]?\s+((?:Dr\.?\s+|Mr\.?\s+|Ms\.?\s+|Mrs\.?\s+)?[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})",
+        re.IGNORECASE)
+    _HONORIFIC = re.compile(
+        r"\b(?:Dr|Mr|Ms|Mrs|Shri|Smt)\.?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})")
+
+    def _cue_names(self, text: str):
+        out = []
+        for rx in (self._NAME_CUE, self._HONORIFIC):
+            for m in rx.finditer(text):
+                val = m.group(1).strip()
+                # strip a leading honorific token so the identity key is the name
+                val = re.sub(r"^(?:Dr|Mr|Ms|Mrs|Shri|Smt)\.?\s+", "", val, flags=re.IGNORECASE).strip()
+                if 3 <= len(val) <= 60 and " " in val:
+                    out.append((val, m.start(1) + (m.group(1).find(val) if val in m.group(1) else 0)))
+        return out
+
     def scan(self, text: str) -> List[Finding]:
         findings: List[Finding] = []
 
@@ -78,6 +100,16 @@ class PIIDetector:
                 for m in _re.finditer(_re.escape(name), text, _re.IGNORECASE):
                     findings.append(Finding("PERSON", m.group(0), m.start(),
                                             m.end(), 0.90, "lexicon", "GLOBAL"))
+
+        # Layer 1c: structural name cues — catches names in UPLOADED docs with
+        # no lexicon and no Presidio (Name:/Patient/Dr. patterns). This is what
+        # makes erase-by-name and name-based retrieval work on uploads.
+        for val, pos in self._cue_names(text):
+            idx = text.find(val, max(0, pos - 2))
+            if idx < 0:
+                idx = text.find(val)
+            if idx >= 0:
+                findings.append(Finding("PERSON", val, idx, idx + len(val), 0.80, "cue", "GLOBAL"))
 
         # Layer 2: Presidio NER (if available) — uncapped
         if self.presidio_active and self._presidio is not None:

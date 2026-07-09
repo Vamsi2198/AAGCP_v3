@@ -56,10 +56,9 @@ class Migrator:
     def _mask(self, text: str) -> tuple[str, int]:
         """
         Mask every PII span, attributing ALL identifiers in this record to ONE
-        subject identity keyed on the strongest identifier present, with the
-        person name as the identity's display name. This makes erasure surgical:
-        erasing the subject shreds all their identifiers (reference-counted, so
-        tokens shared with another subject survive).
+        subject identity keyed on the strongest identifier present. Store ALL
+        strong identifiers (phone, email, MRN, AADHAAR, etc) as lookup keys so
+        queries by any identifier find the subject, not just by name.
         """
         findings = self.detector.scan(text)
         if not findings:
@@ -67,13 +66,29 @@ class Migrator:
         # choose canonical identity for this record
         canon = min(findings, key=lambda f: self._STRENGTH.get(f.entity_type, 4))
         identity_id = f"{canon.entity_type}:{canon.value.strip().lower()}"
-        display = next((f.value for f in findings if f.entity_type == "PERSON"), None)
+        
+        # Collect all display names: person name + all strong identifiers (phone, email, MRN, etc)
+        display_names = set()
+        person_name = next((f.value for f in findings if f.entity_type == "PERSON"), None)
+        if person_name:
+            display_names.add(person_name)
+        # Add all identifiers with strength <= 3 (strong ones: AADHAAR, PAN, MRN, PHONE, EMAIL)
+        for f in findings:
+            if self._STRENGTH.get(f.entity_type, 4) <= 3:
+                display_names.add(f.value)
 
         masked = text
         for f in sorted(findings, key=lambda x: x.start, reverse=True):
-            dn = f.value if f.entity_type == "PERSON" else display
-            tok = self.vault.token_for(f, identity_id=identity_id, display_name=dn)
+            # Pass the first (or all) display name(s) for this specific finding
+            primary_display = person_name or next(iter(display_names), None)
+            tok = self.vault.token_for(f, identity_id=identity_id, display_name=primary_display)
             masked = masked[:f.start] + tok + masked[f.end:]
+        
+        # Register all identifiers as lookup keys for the same identity
+        for dn in display_names:
+            if dn and identity_id not in self.vault._idnames.get(identity_id, set()):
+                self.vault._idnames.setdefault(identity_id, set()).add(dn)
+        
         return masked, len(findings)
 
     def clean(self, store: VectorStoreConnector, report: ScanReport,

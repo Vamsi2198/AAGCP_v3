@@ -1,9 +1,18 @@
 """Deterministic pseudonym vault with reference-counted crypto-shred."""
 from __future__ import annotations
-import hmac, hashlib, json, secrets, re
+import hmac, hashlib, json, secrets, re, logging
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 from .detect.detector import Finding
+
+logger = logging.getLogger(__name__)
+
+
+def _normalize_identifier(s: str) -> str:
+    """Normalize phone/email/identifier for matching: remove formatting, lowercase."""
+    # Remove formatting chars: spaces, parens, dashes, dots (except email @)
+    normalized = re.sub(r"[\s\(\)\-]", "", s.lower())
+    return normalized
 
 
 class PseudonymVault:
@@ -51,9 +60,45 @@ class PseudonymVault:
         return re.sub(r"<[A-Z_]+_[0-9a-f]+>", sub, text)
 
     def resolve_identities_by_name(self, name: str) -> List[str]:
-        n = name.strip().lower()
-        return [i for i, names in self._idnames.items()
-                if any(n == dn.strip().lower() for dn in names)]
+        n = re.sub(r"\s+", " ", name.strip().lower())
+        n_norm = _normalize_identifier(name)  # For phone/email matching
+        
+        if not n:
+            return []
+        
+        # 1) exact (normalized) match
+        exact = [i for i, names in self._idnames.items()
+                 if any(n == re.sub(r"\s+", " ", dn.strip().lower()) for dn in names)]
+        if exact:
+            logger.info(f"[VAULT] Exact name match for '{name}' → {exact}")
+            return sorted(set(exact))
+        
+        # 1b) phone/email normalized match (e.g., "4382 9306 7067" matches "+1 (438) 293-06 7067")
+        if n_norm and len(n_norm) > 3:  # Avoid false matches on short strings
+            norm_exact = [i for i, names in self._idnames.items()
+                         if any(n_norm == _normalize_identifier(dn) for dn in names)]
+            if norm_exact:
+                logger.info(f"[VAULT] Normalized identifier match for '{name}' → {norm_exact}")
+                return sorted(set(norm_exact))
+        
+        # 2) fallback: query is a substring of a stored name, or shares all its
+        #    tokens (so "kavya" or "kavya pillai" both find "Kavya Pillai")
+        q_toks = set(re.findall(r"[a-z0-9]+", n))
+        partial = []
+        for i, names in self._idnames.items():
+            for dn in names:
+                dn_l = dn.strip().lower()
+                dn_toks = set(re.findall(r"[a-z0-9]+", dn_l))
+                if n in dn_l or (q_toks and q_toks <= dn_toks):
+                    partial.append(i)
+                    break
+        
+        if partial:
+            logger.info(f"[VAULT] Partial match for '{name}' → {partial[:3]}")
+        else:
+            logger.warning(f"[VAULT] No identity found for query '{name}'")
+        
+        return sorted(set(partial))
 
     def get_identity_tokens(self, identity_id: str) -> List[str]:
         return sorted(self._identities.get(identity_id, set()))

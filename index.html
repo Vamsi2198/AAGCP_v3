@@ -329,7 +329,7 @@ async function query(){
   out += `Answer: ${esc(q.answer || "No answer returned")}\n\n`;
   out += q.results.map((h, idx) =>
     `Chunk ${idx + 1} [${h.id}] score=${h.score}\n${color(h.text || h.source_text || "[hidden]")}\n` +
-    `Metadata: ${esc(JSON.stringify(h.metadata || {}))}`
+    ``
   ).join("\n\n---\n\n");
 
   $("qout").innerHTML = out.replace(/\n/g, "<br>");

@@ -14,12 +14,15 @@ returns identical bytes to every role; the layer decides what is revealed.
 from __future__ import annotations
 import math
 import re
+import logging
 from typing import List, Optional
 from collections import Counter
 
 from ..embed.embedders import EmbedderAdapter
 from ..store.connectors import VectorStoreConnector
 from ..vault import PseudonymVault
+
+logger = logging.getLogger(__name__)
 
 
 def _toks(s: str) -> List[str]:
@@ -121,6 +124,11 @@ class GovernedRetriever:
             for iid in matched_ids:
                 matched_tokens.update(self.vault.get_identity_tokens(iid))
 
+        logger.info(f"[RETRIEVER] Query: '{text[:60]}...' | matched_ids={len(matched_ids)} ids | {len(matched_tokens)} matched_tokens")
+        if matched_ids:
+            logger.info(f"           Identity IDs: {matched_ids[:3]}")  # Show first 3
+            logger.info(f"           Tokens: {sorted(list(matched_tokens))[:3]}")  # Show first 3 tokens
+
         if matched_tokens:
             q = f"{q} " + " ".join(sorted(matched_tokens))
 
@@ -139,6 +147,8 @@ class GovernedRetriever:
             dense_norm = _minmax(dense_raw)
 
             lexical_weight = 1.0 - dense_weight
+            logger.info(f"[RETRIEVER] Weights: dense={dense_weight:.2f}, lexical={lexical_weight:.2f} | Total hits: {len(hits)}")
+            
             for i, h in enumerate(hits):
                 txt = h.get("source_text") or ""
                 vault_boost = 0.35 if _contains_any_token(txt, matched_tokens) else 0.0
@@ -150,8 +160,18 @@ class GovernedRetriever:
                     + lexical_weight * bm25_norm[i]
                     + vault_boost
                 )
+                
+                # Log top results for debugging
+                if i < 3 or vault_boost > 0:
+                    logger.info(f"  [{i}] {h['id'][:30]}... | "
+                               f"dense_raw={dense_raw[i]:.4f} * {dense_weight} = {dense_weight * dense_norm[i]:.4f} | "
+                               f"bm25_raw={bm25_raw[i]:.4f} * {lexical_weight} = {lexical_weight * bm25_norm[i]:.4f} | "
+                               f"vault_boost={vault_boost} | final_score={h['score']:.4f}")
 
             hits = sorted(hits, key=lambda x: -x["score"])[:k]
+            logger.info(f"[RETRIEVER] Top {min(k, len(hits))} results after reranking:")
+            for i, h in enumerate(hits[:5]):
+                logger.info(f"  #{i+1} {h['id'][:40]}... score={h['score']:.4f}")
         else:
             hits = hits[:k]
 
