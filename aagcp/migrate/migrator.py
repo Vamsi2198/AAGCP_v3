@@ -20,7 +20,7 @@ honest boundary you state to any brownfield customer.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional
-
+from ..detect.patterns import GLOBAL_PATTERNS
 from ..detect.detector import PIIDetector
 from ..vault import PseudonymVault
 from ..embed.embedders import EmbedderAdapter
@@ -50,8 +50,8 @@ class Migrator:
         self.embedder = embedder
 
     # Strongest identifier wins as the identity key (Aadhaar > PAN > ... > name)
-    _STRENGTH = {"AADHAAR": 0, "PAN": 1, "US_SSN": 1, "MRN": 2, "IN_PHONE": 3,
-                 "EMAIL": 3, "PERSON": 5}
+    IDENTITY_STRENGTH = {pat.entity_type: i for i, pat in enumerate(GLOBAL_PATTERNS)}
+    IDENTITY_STRENGTH["PERSON"] = len(GLOBAL_PATTERNS)  # = 25, after all regex patterns
 
     def _mask(self, text: str) -> tuple[str, int]:
         """
