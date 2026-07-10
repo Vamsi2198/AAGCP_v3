@@ -127,16 +127,10 @@
         </div>
       </div>
 
-      <div class="card">
-        <h2>2 · Audit report</h2>
-        <p class="sub">Regulator-ready branded PDF from the current scan.</p>
-        <a class="dl" href="/report.pdf" target="_blank">
-          <button class="b-ghost">⬇ Download PII Audit PDF</button>
-        </a>
-      </div>
+      
 
       <div class="card">
-        <h2>3 · Connect &amp; Scan</h2>
+        <h2>2 · Connect &amp; Scan</h2>
         <p class="sub">Connect to a (simulated) production index full of un-redacted PII, then scan it uncapped.</p>
         <div class="row">
           <div class="grow">
@@ -156,7 +150,13 @@
         </div>
         <div id="bars" class="bars"></div>
       </div>
-
+      <div class="card">
+        <h2>3 · Audit report</h2>
+        <p class="sub">Regulator-ready branded PDF from the current scan.</p>
+        <a class="dl" href="/report.pdf" target="_blank">
+          <button class="b-ghost">⬇ Download PII Audit PDF</button>
+        </a>
+      </div>
       <div class="card">
         <h2>4 · Clean in place</h2>
         <p class="sub">Re-embed the poisoned subset through tokenization. Only affected vectors — no full re-embed.</p>
@@ -176,7 +176,7 @@
         <div class="row">
           <div class="grow">
             <label>Query</label>
-            <input id="queryText" type="text" value="patients diagnosed with diabetes" placeholder="Enter a query" />
+            <input id="queryText" type="text" placeholder="ex: Ramesh Iyer" />
           </div>
           <div style="align-self:flex-end"><button class="b-accent" onclick="query()">Run query</button></div>
         </div>
