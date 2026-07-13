@@ -87,6 +87,56 @@ def _contains_any_token(text: str, tokens: set[str]) -> bool:
     return False
 
 
+def _looks_like_person_name_query(text: str) -> bool:
+    """Heuristic: plain alphabetic full name query (e.g., 'Kavya Pillai')."""
+    q = (text or "").strip()
+    if not q:
+        return False
+    # 2-4 alphabetic tokens, no digits/symbol-heavy identifiers.
+    return bool(re.fullmatch(r"[A-Za-z]{2,}(?:\s+[A-Za-z]{2,}){1,3}", q))
+
+
+def _extract_identifier_snippets(text: str) -> dict[str, set[str]]:
+    """Extract high-signal identifier-like snippets from free-text query.
+
+    This intentionally does not validate checksums so user-entered values with
+    typos around labels (e.g. 'adhaar') can still be resolved via vault keys.
+    """
+    s = text or ""
+    out: dict[str, set[str]] = {}
+
+    patterns = {
+        "AADHAAR": re.compile(r"\b\d{4}\s?\d{4}\s?\d{4}\b"),
+        "PAN": re.compile(r"\b[A-Z]{5}\d{4}[A-Z]\b", re.I),
+        "MRN": re.compile(r"\bMRN[-:\s]?\d{5,10}\b", re.I),
+        "EMAIL": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
+    }
+
+    for etype, pat in patterns.items():
+        vals = {m.group(0).strip() for m in pat.finditer(s)}
+        if vals:
+            out[etype] = vals
+
+    return out
+
+
+def _dedupe_preserve_order(items: List[str]) -> List[str]:
+    seen: set[str] = set()
+    out: List[str] = []
+    for x in items:
+        if x in seen:
+            continue
+        seen.add(x)
+        out.append(x)
+    return out
+
+
+def _token_prefixes_for_identifier_type(etype: str) -> tuple[str, ...]:
+    if etype == "EMAIL":
+        return ("<EMAIL_", "<EMAIL_ADDRESS_")
+    return (f"<{etype}_",)
+
+
 
 class GovernedRetriever:
     def __init__(self, store: VectorStoreConnector, embedder: EmbedderAdapter,
@@ -105,6 +155,7 @@ class GovernedRetriever:
         hybrid: bool = True,        # embed + BM25 by default
         candidate_k: int = 100,     # dense fetch pool for rerank recall
         dense_weight: float = 0.45, # 0.45 dense + 0.55 lexical
+        max_identity_matches: int = 3,
     ) -> List[dict]:
         q = text
         if self.detector:
@@ -113,18 +164,62 @@ class GovernedRetriever:
                 tok = self.vault.token_for(f)
                 q = q[:f.start] + tok + q[f.end:]
 
-        matched_ids = []
+        query_id_hits: List[str] = []
         if hasattr(self.vault, "resolve_identities_by_query"):
-            matched_ids = self.vault.resolve_identities_by_query(text)
+            query_id_hits = self.vault.resolve_identities_by_query(text)
         elif hasattr(self.vault, "resolve_identities_by_name"):
-            matched_ids = self.vault.resolve_identities_by_name(text)
+            query_id_hits = self.vault.resolve_identities_by_name(text)
+
+        # Mixed query support: extract exact identifier snippets from raw query
+        # (works even when label is misspelled, e.g. 'adhaar').
+        identifier_snippets = _extract_identifier_snippets(text)
+        identifier_id_hits: List[str] = []
+        if identifier_snippets and hasattr(self.vault, "resolve_identities_by_name"):
+            for vals in identifier_snippets.values():
+                for v in vals:
+                    identifier_id_hits.extend(self.vault.resolve_identities_by_name(v))
+
+        matched_ids = _dedupe_preserve_order(identifier_id_hits + query_id_hits)
+
+        if max_identity_matches > 0:
+            matched_ids = matched_ids[:max_identity_matches]
 
         matched_tokens: set[str] = set()
         if hasattr(self.vault, "get_identity_tokens"):
             for iid in matched_ids:
                 matched_tokens.update(self.vault.get_identity_tokens(iid))
 
+        # If query contains explicit identifiers, prefer only those token types
+        # for identity boost to avoid broad person-name overlap noise.
+        if matched_tokens and identifier_snippets:
+            id_prefixes = tuple(
+                p
+                for et in identifier_snippets.keys()
+                for p in _token_prefixes_for_identifier_type(et)
+            )
+            id_only_tokens = {t for t in matched_tokens if t.startswith(id_prefixes)}
+            if id_only_tokens:
+                logger.info(
+                    "[RETRIEVER] Identifier snippets detected; restricting identity boost "
+                    f"to identifier tokens ({len(id_only_tokens)} of {len(matched_tokens)})."
+                )
+                matched_tokens = id_only_tokens
+
+        # Person-name queries should primarily anchor on PERSON tokens; using
+        # every linked identifier (AADHAAR/MRN/PHONE) can over-boost a wrong chunk
+        # when identity linkage is noisy in migrated historical data.
+        if matched_tokens and _looks_like_person_name_query(text):
+            person_tokens = {t for t in matched_tokens if t.startswith("<PERSON_")}
+            if person_tokens:
+                logger.info(
+                    "[RETRIEVER] Name-like query detected; restricting identity boost "
+                    f"to PERSON tokens ({len(person_tokens)} of {len(matched_tokens)})."
+                )
+                matched_tokens = person_tokens
+
         logger.info(f"[RETRIEVER] Query: '{text[:60]}...' | matched_ids={len(matched_ids)} ids | {len(matched_tokens)} matched_tokens")
+        if identifier_snippets:
+            logger.info(f"           Identifier snippets: { {k: sorted(list(v))[:2] for k, v in identifier_snippets.items()} }")
         if matched_ids:
             logger.info(f"           Identity IDs: {matched_ids[:3]}")  # Show first 3
             logger.info(f"           Tokens: {sorted(list(matched_tokens))[:3]}")  # Show first 3 tokens

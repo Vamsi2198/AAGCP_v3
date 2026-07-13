@@ -6,6 +6,8 @@ pinecone
 pdfplumber
 # Optional — only used if OPENAI_API_KEY is set (API embeddings, no torch):
 openai
+traceloop-sdk
+opentelemetry-exporter-otlp
 # Production backends (install only what you connect to):
 # presidio-analyzer   presidio-anonymizer   # global NER (names/addresses)
 # sentence-transformers                      # local embeddings (needs more RAM)

@@ -86,7 +86,7 @@ class Migrator:
         
         # Register all identifiers as lookup keys for the same identity
         for dn in display_names:
-            if dn and identity_id not in self.vault._idnames.get(identity_id, set()):
+            if dn and dn not in self.vault._idnames.get(identity_id, set()):
                 self.vault._idnames.setdefault(identity_id, set()).add(dn)
         
         return masked, len(findings)

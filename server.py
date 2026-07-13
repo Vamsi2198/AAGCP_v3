@@ -3,8 +3,23 @@
 AAGCP-Vector PRO — deployable server (Python standard library only).
 
 No FastAPI, no torch. Dependency footprint: numpy, pyyaml, reportlab (+ openai
-only if you set OPENAI_API_KEY). That is why it deploys on the smallest free
-tier where torch-based apps run out of memory.
+only if you set OPENAI_API_KEY, + langsmith only if you set LANGSMITH_API_KEY).
+That is why it deploys on the smallest free tier where torch-based apps run
+out of memory.
+
+Tracing: set LANGSMITH_API_KEY (and optionally LANGSMITH_PROJECT /
+LANGSMITH_ENDPOINT) to send traces to LangSmith. Every top-level engine
+operation (connect/scan/scan_last_pdf/upload_pdf/clean/erase/query, plus the
+LLM answer-generation step) is wrapped in `@workflow(...)`, which becomes
+`langsmith.traceable(...)` once a key is present, so each of those becomes a
+root run in your LangSmith project and shows up in the "Recent LangSmith
+Traces" panel — not just queries. LLM calls made through the `openai` client
+during answer generation get picked up automatically by LangSmith's OpenAI
+wrapper if you swap `from openai import OpenAI` for
+`from langsmith.wrappers import wrap_openai` + `wrap_openai(OpenAI())`. The
+custom TraceCollector/_Span machinery below is unrelated to LangSmith — it
+powers the "Live Trace" panel in the UI and keeps working regardless of
+which tracing backend is configured.
 
 Simulates a connected production index (seedable, arbitrary size) so the whole
 detect -> scan -> clean -> govern flow is live and clickable. Swap in a real
@@ -13,8 +28,13 @@ connector (Pinecone/Qdrant/pgvector) from aagcp.store.connectors for production
 """
 from __future__ import annotations
 import base64, io, json, os, random, re, string, tempfile, logging
+import importlib
+import itertools
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 from dotenv import load_dotenv
 from pinecone import Pinecone
 from datetime import datetime
@@ -38,6 +58,77 @@ from aagcp.scan.scanner import Scanner
 from aagcp.migrate.migrator import Migrator
 from aagcp.retrieve.retriever import GovernedRetriever
 from aagcp.report.pdf import build_audit_pdf
+
+
+class TraceCollector:
+    """Collect nested request-local spans so the frontend can render them."""
+
+    def __init__(self):
+        self._local = threading.local()
+
+    def start(self):
+        self._local.spans = []
+        self._local.stack = []
+        self._local.counter = itertools.count(1)
+
+    def span(self, name: str, **attrs):
+        if not hasattr(self._local, "counter"):
+            return _NullSpan()
+        return _Span(self, name, attrs)
+
+    def collect(self) -> list[dict]:
+        spans = list(getattr(self._local, "spans", []))
+        spans.sort(key=lambda item: (item["start_ms"], item["id"]))
+        return spans
+
+    def _push(self, span):
+        self._local.stack.append(span)
+
+    def _pop(self, span):
+        self._local.stack.pop()
+        self._local.spans.append(span.to_dict())
+
+
+class _NullSpan:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _Span:
+    def __init__(self, collector: TraceCollector, name: str, attrs: dict):
+        self.collector = collector
+        self.name = name
+        self.attrs = attrs
+        self.id = next(collector._local.counter)
+        self.parent_id = collector._local.stack[-1].id if collector._local.stack else None
+
+    def __enter__(self):
+        self.start = time.time()
+        self.collector._push(self)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.end = time.time()
+        self.error = str(exc) if exc else None
+        self.collector._pop(self)
+        return False
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "parent_id": self.parent_id,
+            "name": self.name,
+            "start_ms": round(self.start * 1000),
+            "duration_ms": round((self.end - self.start) * 1000, 2),
+            "attrs": self.attrs,
+            "error": self.error,
+        }
+
+
+TRACE = TraceCollector()
 
 
 RECORD_HEADER_PATTERNS = [
@@ -206,6 +297,216 @@ def chunk_pdf_bytes(data: bytes, filename: str):
 # Load environment variables from .env file
 load_dotenv()
 
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def workflow(name=None, process_inputs=None):
+    """Fallback no-op decorator. Rebound to LangSmith's `traceable` below
+    once we know a valid API key / SDK is available.
+
+    `process_inputs`, when supplied, is forwarded to `langsmith.traceable`
+    once tracing is live — it lets a caller strip/redact arguments (e.g. raw
+    PDF bytes) before they're sent to LangSmith as run inputs. It is a no-op
+    while tracing is disabled."""
+    def decorator(func):
+        return func
+    return decorator
+
+
+def _init_langsmith() -> bool:
+    """Initialize LangSmith tracing. LangSmith's SDK reads its config from
+    the LANGCHAIN_*/LANGSMITH_* env vars, so init here just means: confirm
+    the SDK is installed, confirm we have an API key, and normalize env vars
+    (LANGSMITH_* -> LANGCHAIN_*) so the SDK picks them up regardless of which
+    convention was used to set them."""
+    try:
+        importlib.import_module("langsmith")
+    except ImportError:
+        logger.info("[TRACING] langsmith not installed; LangSmith tracing disabled")
+        return False
+
+    api_key = os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")
+    if not api_key:
+        logger.info("[TRACING] No LANGSMITH_API_KEY/LANGCHAIN_API_KEY set; LangSmith tracing disabled")
+        return False
+
+    # LangSmith's SDK looks for the LANGCHAIN_* names by default.
+    os.environ.setdefault("LANGCHAIN_API_KEY", api_key)
+    os.environ["LANGCHAIN_TRACING_V2"] = "true"
+    os.environ.setdefault(
+        "LANGCHAIN_PROJECT",
+        os.getenv("LANGSMITH_PROJECT", os.getenv("OTEL_SERVICE_NAME", "aagcp-vector-pro")),
+    )
+    endpoint = os.getenv("LANGSMITH_ENDPOINT") or os.getenv("LANGCHAIN_ENDPOINT")
+    if endpoint:
+        os.environ["LANGCHAIN_ENDPOINT"] = endpoint
+
+    global workflow
+    try:
+        langsmith_module = importlib.import_module("langsmith")
+        _traceable = langsmith_module.traceable
+
+        def workflow(name=None, process_inputs=None):
+            def decorator(func):
+                kwargs = {"name": name or func.__name__}
+                if process_inputs is not None:
+                    kwargs["process_inputs"] = process_inputs
+                return _traceable(**kwargs)(func)
+            return decorator
+    except Exception as exc:
+        logger.warning(f"[TRACING] Could not bind langsmith.traceable; falling back to no-op: {type(exc).__name__}: {exc}")
+
+    logger.info(f"[TRACING] LangSmith initialized (project={os.environ.get('LANGCHAIN_PROJECT')})")
+    return True
+
+
+def _tracing_exporter_name() -> str | None:
+    return "langsmith" if LANGSMITH_ENABLED else None
+
+
+def _current_trace_info() -> dict:
+    info = {
+        "enabled": LANGSMITH_ENABLED,
+        "exporter": _tracing_exporter_name(),
+        "trace_id": None,
+        "run_id": None,
+        "url": None,
+    }
+    if not LANGSMITH_ENABLED:
+        return info
+
+    try:
+        run_helpers = importlib.import_module("langsmith.run_helpers")
+        run_tree = run_helpers.get_current_run_tree()
+        if run_tree is not None:
+            trace_id = getattr(run_tree, "trace_id", None)
+            run_id = getattr(run_tree, "id", None)
+            info["trace_id"] = str(trace_id) if trace_id else None
+            info["run_id"] = str(run_id) if run_id else None
+            try:
+                info["url"] = run_tree.get_url()
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.debug(f"[TRACING] Could not read current LangSmith run tree: {type(exc).__name__}: {exc}")
+    return info
+
+
+LANGSMITH_ENABLED = _init_langsmith()
+
+_LANGSMITH_CLIENT = None
+
+
+def _langsmith_client():
+    """Lazily create (and cache) a langsmith.Client for read calls like
+    list_runs(). Returns None if tracing isn't configured or the client
+    can't be constructed."""
+    global _LANGSMITH_CLIENT
+    if not LANGSMITH_ENABLED:
+        return None
+    if _LANGSMITH_CLIENT is not None:
+        return _LANGSMITH_CLIENT
+    try:
+        langsmith_module = importlib.import_module("langsmith")
+        _LANGSMITH_CLIENT = langsmith_module.Client()
+        return _LANGSMITH_CLIENT
+    except Exception as exc:
+        logger.warning(f"[TRACING] Could not create LangSmith client: {type(exc).__name__}: {exc}")
+        return None
+
+
+def list_recent_traces(limit: int = 25) -> dict:
+    """Pull the most recent root runs (i.e. top-level traces — one per
+    /query, /connect, /scan, /scan_last_pdf, /upload_pdf, /clean, or /erase
+    call) for the configured project, for display in the frontend's trace
+    list. Read-only — does not affect tracing itself."""
+    project = os.environ.get("LANGCHAIN_PROJECT", "aagcp-vector-pro")
+    result = {"enabled": LANGSMITH_ENABLED, "project": project, "traces": []}
+    if not LANGSMITH_ENABLED:
+        return result
+
+    client = _langsmith_client()
+    if client is None:
+        result["error"] = "LangSmith client unavailable"
+        return result
+
+    try:
+        runs = list(client.list_runs(project_name=project, is_root=True, limit=limit))
+        traces = []
+        for run in runs:
+            try:
+                url = client.get_run_url(run=run)
+            except Exception:
+                url = None
+            start = getattr(run, "start_time", None)
+            end = getattr(run, "end_time", None)
+            latency_ms = None
+            if start and end:
+                try:
+                    latency_ms = round((end - start).total_seconds() * 1000, 2)
+                except Exception:
+                    latency_ms = None
+            if getattr(run, "error", None):
+                status = "error"
+            elif end is None:
+                status = "running"
+            else:
+                status = "success"
+
+            inputs = getattr(run, "inputs", None) or {}
+            outputs = getattr(run, "outputs", None) or {}
+            if not isinstance(inputs, dict):
+                inputs = {}
+            if not isinstance(outputs, dict):
+                outputs = {}
+
+            def _trim(value, max_len=140):
+                if value is None:
+                    return None
+                text = str(value).strip()
+                return (text[:max_len] + "…") if len(text) > max_len else text
+
+            # Non-query runs (connect/scan/upload/clean/wipe/erase) don't have
+            # a query/answer pair, so build a short generic summary from
+            # whatever's in outputs (falling back to inputs) so the trace list
+            # still shows something useful for them.
+            summary = None
+            if not outputs.get("answer"):
+                payload = {k: v for k, v in outputs.items() if k != "self"} or \
+                          {k: v for k, v in inputs.items() if k not in ("self", "content_b64")}
+                try:
+                    summary = _trim(json.dumps(payload, default=str), 160)
+                except Exception:
+                    summary = _trim(str(payload), 160)
+
+            traces.append({
+                "id": str(getattr(run, "id", "") or ""),
+                "name": getattr(run, "name", None),
+                "run_type": getattr(run, "run_type", None),
+                "status": status,
+                "error": _trim(getattr(run, "error", None), 200),
+                "start_time": start.isoformat() if start else None,
+                "latency_ms": latency_ms,
+                "url": url,
+                "role": inputs.get("role"),
+                "query": _trim(inputs.get("query_text") or inputs.get("query")),
+                "answer": _trim(outputs.get("answer")),
+                "governed": outputs.get("governed"),
+                "summary": summary,
+            })
+        traces.sort(key=lambda t: t["start_time"] or "", reverse=True)
+        result["traces"] = traces
+    except Exception as exc:
+        logger.warning(f"[TRACING] Failed to list LangSmith runs: {type(exc).__name__}: {exc}")
+        result["error"] = str(exc)
+    return result
+
+
 ROOT = Path(__file__).parent
 VAULT_STATE_FILE = ROOT / ".aagcp_vault_state.json"
 SECRET = os.getenv("VAULT_SECRET", b"aagcp-vector-pro-demo-secret32b!").encode() if isinstance(os.getenv("VAULT_SECRET", ""), str) else os.getenv("VAULT_SECRET", b"aagcp-vector-pro-demo-secret32b!")
@@ -216,6 +517,8 @@ SAFE_METADATA_KEYS = {
     "chunk", "chunk_type", "doc", "governed", "ingested", "page",
     "pdf_filename", "record_id", "source", "pii_masked"
 }
+
+DEFAULT_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
 
 FIRST = ["Ramesh","Priya","Arjun","Kavya","Vikram","Ananya","Meera","Sanjay",
          "Divya","Rahul","John","Emma","Liam","Olivia","Noah","Sophia","Aditya","Neha"]
@@ -287,6 +590,88 @@ def _sanitize_metadata_for_role(metadata: dict, role: str) -> dict:
     return dict(metadata or {})
 
 
+def _fallback_answer(results: list[dict]) -> str:
+    if not results:
+        return ""
+    return (results[0].get("text") or results[0].get("source_text") or "")[:220]
+
+
+def _build_llm_context(results: list[dict], max_chunks: int = 5, max_chars: int = 4000) -> str:
+    parts = []
+    total = 0
+    for idx, item in enumerate(results[:max_chunks], start=1):
+        chunk_text = (item.get("text") or item.get("source_text") or "").strip()
+        if not chunk_text:
+            continue
+        block = f"Chunk {idx} | id={item.get('id', '')} | score={item.get('score', 0)}\n{chunk_text}"
+        if total + len(block) > max_chars:
+            remaining = max_chars - total
+            if remaining <= 0:
+                break
+            block = block[:remaining]
+        parts.append(block)
+        total += len(block)
+        if total >= max_chars:
+            break
+    return "\n\n".join(parts)
+
+
+def _drop_pdf_bytes(inputs: dict) -> dict:
+    """process_inputs hook for the upload_pdf trace: keep filename/metadata,
+    drop the raw base64 PDF bytes (and the bound `self`) so the document
+    contents never get logged into LangSmith."""
+    return {k: v for k, v in inputs.items() if k not in ("content_b64", "self")}
+
+
+@workflow(name="governed_answer_generation")
+def _generate_answer(query_text: str, role: str, governed: bool, results: list[dict]) -> tuple[str, str, str | None]:
+    fallback = _fallback_answer(results)
+    context = _build_llm_context(results)
+    if not context:
+        return fallback, "top_chunk", None
+
+    if not os.getenv("OPENAI_API_KEY"):
+        return fallback, "top_chunk", None
+
+    try:
+        from openai import OpenAI
+
+        client = OpenAI()
+        with TRACE.span("openai_chat_completion", model=DEFAULT_CHAT_MODEL):
+            response = client.chat.completions.create(
+                model=DEFAULT_CHAT_MODEL,
+                temperature=0,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Answer the user using only the supplied retrieved chunks. "
+                            "Do not use outside knowledge. If the chunks do not contain "
+                            "enough information, say so briefly. Preserve governance: do "
+                            "not infer or reveal anything beyond the provided context."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Role: {role}\n"
+                            f"Governed retrieval active: {governed}\n"
+                            f"Question: {query_text}\n\n"
+                            f"Retrieved chunks:\n{context}\n\n"
+                            "Write a concise answer grounded only in the chunks above."
+                        ),
+                    },
+                ],
+            )
+        answer = (response.choices[0].message.content or "").strip()
+        if answer:
+            return answer, "llm", DEFAULT_CHAT_MODEL
+    except Exception as exc:
+        logger.warning(f"[QUERY] LLM answer generation failed: {type(exc).__name__}: {exc}")
+
+    return fallback, "top_chunk", None
+
+
 class Engine:
     def __init__(self):
         logger.info("[ENGINE] Initializing Engine...")
@@ -317,6 +702,7 @@ class Engine:
         self.last_uploaded_ids: list[str] = []
         self.last_uploaded_pdf_filename: str | None = None
 
+    @workflow(name="connect_index")
     def reset(self, seed: int = 1) -> dict:
         logger.info(f"[RESET] Resetting engine with seed={seed}")
         random.seed(7)
@@ -381,6 +767,7 @@ class Engine:
                 "embedder": self.embedder.name,
                 "message": f"Connected to Pinecone index with {current_count} vectors. Embedder: {self.embedder.name}."}
 
+    @workflow(name="scan_index")
     def scan(self) -> dict:
         logger.info("[SCAN] Starting scan operation")
         try:
@@ -484,6 +871,7 @@ class Engine:
 
         return {"ok": True, "count": current_count, "top_chunks": chunks}
 
+    @workflow(name="upload_pdf", process_inputs=_drop_pdf_bytes)
     def upload_pdf(self, filename: str, content_b64: str) -> dict:
         logger.info(f"[UPLOAD] Ingesting PDF file: {filename}")
         try:
@@ -555,6 +943,7 @@ class Engine:
             logger.error(f"[UPLOAD] Error ingesting PDF: {type(e).__name__}: {e}")
             raise
 
+    @workflow(name="scan_last_pdf")
     def scan_last_uploaded_pdf(self) -> dict:
         logger.info("[SCAN_LAST_PDF] Starting scan for the most recently uploaded PDF")
         if not self.last_uploaded_ids:
@@ -579,6 +968,7 @@ class Engine:
             logger.error(f"[SCAN_LAST_PDF] Error: {type(e).__name__}: {e}")
             raise
 
+    @workflow(name="wipe_index")
     def wipe_all(self) -> dict:
         logger.info("[WIPE] Wiping entire vector store")
         total = self.store.count()
@@ -602,57 +992,79 @@ class Engine:
         logger.info(f"[WIPE] Deleted {total} vectors from index")
         return {"deleted": total, "message": f"Deleted {total} vectors from the index."}
 
+    @workflow(name="query_request")
     def query(self, role: str, query_text: str) -> dict:
         logger.info(f"[QUERY] Starting query with role={role}")
+        TRACE.start()
         try:
-            admin_roles = ("COMPLIANCE_OFFICER", "ADMIN", "DATA_STEWARD")
-            is_admin = role in admin_roles
-            is_finance = role == "FINANCE"
-            reveal = {"ALL"} if is_admin else set()
-            partial = {} if is_admin or is_finance else ANALYST_PARTIAL
-            gov = self.last_report is not None and getattr(self, "_cleaned", False)
-            logger.info(f"[QUERY] Role reveal={reveal}, governed={gov}, has_report={self.last_report is not None}")
-            
-            ret = GovernedRetriever(self.store, self.embedder, self.vault,
-                                    detector=self.detector if gov else None)
-            hits = ret.query(
-                query_text,
-                reveal,
-                partial,
-                k=20,
-                hybrid=True,
-                candidate_k=100,
-                dense_weight=0.45,
-            )
-            logger.info(f"[QUERY] Retrieved {len(hits)} results")
+            with TRACE.span("query", role=role, query=query_text[:80]):
+                admin_roles = ("COMPLIANCE_OFFICER", "ADMIN", "DATA_STEWARD")
+                is_admin = role in admin_roles
+                is_finance = role == "FINANCE"
+                reveal = {"ALL"} if is_admin else set()
+                partial = {} if is_admin or is_finance else ANALYST_PARTIAL
+                gov = self.last_report is not None and getattr(self, "_cleaned", False)
+                logger.info(f"[QUERY] Role reveal={reveal}, governed={gov}, has_report={self.last_report is not None}")
 
-            results = []
-            for h in hits:
-                if role == "ANALYST_ROLE":
-                    text = ""
-                    source_text = ""
-                elif is_finance:
-                    text = h.get("text") or ""
-                    source_text = text
-                else:
-                    text = h.get("text") or h.get("source_text") or ""
-                    source_text = h.get("source_text") or text
-                results.append({
-                    "id": h["id"],
-                    "score": round(h.get("score", 0), 3),
-                    "text": text[:220],
-                    "source_text": source_text[:220],
-                    "metadata": _sanitize_metadata_for_role(h.get("metadata") or {}, role)
-                })
+                with TRACE.span("setup_retriever", embedder=self.embedder.name, governed=gov):
+                    ret = GovernedRetriever(
+                        self.store,
+                        self.embedder,
+                        self.vault,
+                        detector=self.detector if gov else None,
+                    )
 
-            answer = results[0]["text"] if results else ""
+                with TRACE.span("vector_search", k=20, candidate_k=100, hybrid=True, dense_weight=0.45) as search_span:
+                    hits = ret.query(
+                        query_text,
+                        reveal,
+                        partial,
+                        k=20,
+                        hybrid=True,
+                        candidate_k=100,
+                        dense_weight=0.45,
+                    )
+                    search_span.attrs["hits"] = len(hits)
+                logger.info(f"[QUERY] Retrieved {len(hits)} results")
+
+                with TRACE.span("governance_filter", role=role, governed=gov):
+                    results = []
+                    for h in hits:
+                        if role == "ANALYST_ROLE":
+                            text = ""
+                            source_text = ""
+                        elif is_finance:
+                            text = h.get("text") or ""
+                            source_text = text
+                        else:
+                            text = h.get("text") or h.get("source_text") or ""
+                            source_text = h.get("source_text") or text
+                        results.append({
+                            "id": h["id"],
+                            "score": round(h.get("score", 0), 3),
+                            "text": text[:220],
+                            "source_text": source_text[:220],
+                            "metadata": _sanitize_metadata_for_role(h.get("metadata") or {}, role)
+                        })
+
+                with TRACE.span("generate_answer") as answer_span:
+                    answer, answer_source, llm_model = _generate_answer(query_text, role, gov, results)
+                    answer_span.attrs["source"] = answer_source
+                    if llm_model:
+                        answer_span.attrs["model"] = llm_model
+
+            trace = _current_trace_info()
+            spans = TRACE.collect()
             logger.info(f"[QUERY] Complete")
             return {"role": role, "governed": gov, "query": query_text,
-                    "answer": answer, "results": results}
+                    "answer": answer, "answer_source": answer_source,
+                    "llm_model": llm_model, "trace": trace, "spans": spans,
+                    "results": results}
         except Exception as e:
             logger.error(f"[QUERY] Error: {type(e).__name__}: {e}")
             raise
 
+    @workflow(name="clean_index")
     def clean(self) -> dict:
         logger.info("[CLEAN] Starting clean operation")
         try:
@@ -680,16 +1092,22 @@ class Engine:
             logger.error(f"[CLEAN] Error: {type(e).__name__}: {e}")
             raise
 
+    @workflow(name="erase_subject")
     def erase(self, subject: str) -> dict:
         logger.info(f"[ERASE] Starting erase for subject='{subject}'")
         try:
-            iids = self.vault.resolve_identities_by_name(subject)
+            # Allow mixed inputs (e.g., "name + Aadhaar") by using the
+            # query resolver when available.
+            if hasattr(self.vault, "resolve_identities_by_query"):
+                iids = self.vault.resolve_identities_by_query(subject)
+            else:
+                iids = self.vault.resolve_identities_by_name(subject)
             logger.info(f"[ERASE] Found {len(iids)} identity matches")
             
             if not iids:
                 logger.warning(f"[ERASE] No vault identity matches '{subject}'")
                 return {"executed": False, "subject": subject,
-                        "message": f"No vault identity matches '{subject}'. "
+                        "message": f"No vault identity matches '{subject}' (name/identifier). "
                                    f"(Clean the index first so identities exist.)"}
             
             if len(iids) > 1:
@@ -735,6 +1153,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         self.end_headers()
         self.wfile.write(body)
 
@@ -749,9 +1170,21 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, (ROOT / "index.html").read_bytes(), "text/html; charset=utf-8")
         if self.path == "/health":
             return self._send(200, {"ok": True, "embedder": STATE.embedder.name,
-                                    "coverage": STATE.detector.coverage()})
+                                    "coverage": STATE.detector.coverage(),
+                                    "tracing": {
+                                        "enabled": LANGSMITH_ENABLED,
+                                        "exporter": _tracing_exporter_name(),
+                                    }})
         if self.path == "/pinecone_health":
             return self._send(200, STATE.pinecone_health())
+        if self.path == "/traces" or self.path.startswith("/traces?"):
+            qs = parse_qs(urlparse(self.path).query)
+            try:
+                limit = int(qs.get("limit", ["25"])[0])
+            except ValueError:
+                limit = 25
+            limit = max(1, min(limit, 100))
+            return self._send(200, list_recent_traces(limit))
         if self.path == "/report.pdf":
             pdf = STATE.report_pdf()
             self.send_response(200)

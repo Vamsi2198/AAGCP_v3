@@ -88,6 +88,48 @@
   pre{background:#060a10;border:1px solid var(--line);border-radius:11px;padding:12px;font-family:var(--mono);
       font-size:11.5px;white-space:pre-wrap;word-break:break-word;margin:10px 0 0;max-height:340px;overflow:auto;color:#c9d6e4}
   pre .tok{color:var(--safe)} pre .er{color:var(--amber);font-weight:600} pre .raw{color:var(--danger)}
+    .tracebox{background:#060a10;border:1px solid var(--line);border-radius:11px;padding:10px 12px;
+      font-family:var(--mono);font-size:11px;color:#c9d6e4;min-height:72px;max-height:340px;overflow:auto;margin-top:10px}
+    .trace-header{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:8px;color:var(--dim);font-size:10.5px}
+    .trace-row{display:flex;align-items:center;gap:8px;margin:6px 0}
+    .trace-row .tname{width:176px;flex:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--dim)}
+    .trace-row .ttrack{flex:1;height:16px;background:#0d141e;border-radius:4px;position:relative;overflow:hidden;border:1px solid #162130}
+    .trace-row .tbar{position:absolute;top:0;bottom:0;background:linear-gradient(90deg,var(--accent),var(--safe));border-radius:4px}
+    .trace-row .tdur{width:64px;flex:none;text-align:right;color:var(--ink);font-variant-numeric:tabular-nums}
+    .trace-row .terr{color:var(--danger)}
+    .ls-link{display:inline-flex;align-items:center;gap:5px;color:var(--accent);text-decoration:none;font-weight:600}
+    .ls-link:hover{text-decoration:underline}
+    .ls-badge{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10.5px;
+        padding:3px 8px;border-radius:20px;border:1px solid var(--line);color:var(--dim);background:var(--panel2)}
+    .ls-badge .dot{width:6px;height:6px;border-radius:50%;background:var(--mute)}
+    .ls-badge.on{color:var(--safe);border-color:#155e46}
+    .ls-badge.on .dot{background:var(--safe);box-shadow:0 0 6px var(--safe)}
+    .trace-list{margin-top:10px;display:flex;flex-direction:column;gap:8px;max-height:420px;overflow:auto}
+    .trace-list-row{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 11px 10px}
+    .trace-list-row.error{border-color:#5c2323}
+    .trace-list-row .tl-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+    .trace-list-row .tl-dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--mute)}
+    .trace-list-row .tl-dot.success{background:var(--safe);box-shadow:0 0 6px var(--safe)}
+    .trace-list-row .tl-dot.error{background:var(--danger);box-shadow:0 0 6px var(--danger)}
+    .trace-list-row .tl-dot.running{background:var(--amber);box-shadow:0 0 6px var(--amber);animation:tlpulse 1.2s ease-in-out infinite}
+    @keyframes tlpulse{0%,100%{opacity:1}50%{opacity:.35}}
+    .trace-list-row .tl-status{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.06em;flex:none;color:var(--dim)}
+    .trace-list-row .tl-status.success{color:var(--safe)}
+    .trace-list-row .tl-status.error{color:var(--danger)}
+    .trace-list-row .tl-status.running{color:var(--amber)}
+    .trace-list-row .tl-role{font-family:var(--mono);font-size:10px;padding:1px 6px;border-radius:5px;border:1px solid var(--line);color:var(--dim);flex:none}
+    .trace-list-row .tl-name{font-family:var(--mono);font-size:10px;padding:1px 6px;border-radius:5px;border:1px solid #2c4a72;color:var(--accent);background:rgba(91,140,255,.08);flex:none}
+    .trace-list-row .tl-time{color:var(--mute);font-family:var(--mono);font-size:10.5px;flex:none;margin-left:auto}
+    .trace-list-row .tl-lat{color:var(--dim);font-family:var(--mono);font-size:11px;flex:none;width:60px;text-align:right}
+    .trace-list-row .tl-link{color:var(--accent);text-decoration:none;flex:none;font-weight:600;font-size:13px}
+    .trace-list-row .tl-link:hover{text-decoration:underline}
+    .trace-list-row .tl-body{margin-top:6px;padding-left:16px;font-size:12px;line-height:1.45}
+    .trace-list-row .tl-q{color:var(--ink)}
+    .trace-list-row .tl-q b{color:var(--dim);font-weight:600}
+    .trace-list-row .tl-a{color:var(--mute);margin-top:2px}
+    .trace-list-row .tl-a b{color:var(--dim);font-weight:600}
+    .trace-list-row .tl-err{color:var(--danger);margin-top:2px}
+    .trace-empty{color:var(--mute);font-size:12px;padding:8px 2px}
   .pill{display:inline-block;font-family:var(--mono);font-size:10.5px;padding:2px 7px;border-radius:6px;
         border:1px solid var(--line);color:var(--dim);margin-left:7px}
   .dl{display:inline-flex;align-items:center;gap:7px;text-decoration:none}
@@ -191,6 +233,8 @@
             </select>
           </div>
         </div>
+        <label>Live Trace <span class="pill" id="traceMeta"></span></label>
+        <div id="traceout" class="tracebox">Run a query to see the live trace.</div>
         <pre id="qout">Run a query to see results.</pre>
       </div>
 
@@ -202,6 +246,15 @@
           <div><button class="b-danger" onclick="erase()">Crypto-shred</button></div>
         </div>
         <pre id="eout" style="max-height:160px">—</pre>
+      </div>
+
+      <div class="card">
+        <h2>7 · Recent LangSmith Traces <span class="pill" id="tracesProjectPill"></span></h2>
+        <p class="sub">Every traced operation — upload, connect, scan, clean, query, erase, wipe — straight from your LangSmith project, not just the last query.</p>
+        <div class="row">
+          <div style="align-self:flex-end"><button class="b-ghost" onclick="loadTraces()">↻ Refresh</button></div>
+        </div>
+        <div id="tracesList" class="trace-list"><div class="trace-empty">Loading…</div></div>
       </div>
     </div>
   </div>
@@ -218,9 +271,81 @@ function color(s){return esc(s)
   .replace(/(&lt;[A-Z_]+_[0-9a-f]+&gt;)/g,'<span class="tok">$1</span>')
   .replace(/(Aadhaar|PAN|SSN|card|phone) ([^,<]+)/g,(m,a,b)=> /[&]/.test(b)?m:a+' <span class="raw">'+b+'</span>');}
 async function call(p,m,b){try{const r=await fetch(p,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined});return await r.json();}catch(e){return{error:String(e)};}}
+async function getJSON(p){try{const r=await fetch(p);return await r.json();}catch(e){return{error:String(e)};}}
+
+function timeAgo(iso){
+  if(!iso) return "";
+  const d = new Date(iso);
+  if(isNaN(d.getTime())) return "";
+  const secs = Math.max(0, Math.round((Date.now() - d.getTime())/1000));
+  if(secs < 60) return `${secs}s ago`;
+  if(secs < 3600) return `${Math.round(secs/60)}m ago`;
+  if(secs < 86400) return `${Math.round(secs/3600)}h ago`;
+  return `${Math.round(secs/86400)}d ago`;
+}
+
+function renderTracesList(data){
+  const box = $("tracesList"), pill = $("tracesProjectPill");
+  if(!box) return;
+
+  if(!data || data.error){
+    box.innerHTML = `<div class="trace-empty">Couldn't load traces${data?.error ? ': '+esc(data.error) : ''}.</div>`;
+    if(pill) pill.textContent = "";
+    return;
+  }
+  if(pill) pill.textContent = data.project || "";
+  if(!data.enabled){
+    box.innerHTML = `<div class="trace-empty">LangSmith isn't configured (no LANGSMITH_API_KEY set).</div>`;
+    return;
+  }
+  if(!data.traces || !data.traces.length){
+    box.innerHTML = `<div class="trace-empty">No traces yet — run an operation (upload, connect, scan, clean, query, erase, wipe) to generate one.</div>`;
+    return;
+  }
+
+  box.innerHTML = data.traces.map(t => {
+    const lat = t.latency_ms != null ? `${t.latency_ms}ms` : (t.status === "running" ? "running…" : "");
+    const link = t.url ? `<a class="tl-link" href="${esc(t.url)}" target="_blank" title="Open in LangSmith">↗</a>` : "";
+    const namePill = t.name ? `<span class="tl-name">${esc(t.name)}</span>` : "";
+    const rolePill = t.role ? `<span class="tl-role">${esc(t.role)}</span>` : "";
+    const bodyLines = [];
+    if(t.query) bodyLines.push(`<div class="tl-q"><b>Q</b> ${esc(t.query)}</div>`);
+    if(t.answer) bodyLines.push(`<div class="tl-a"><b>A</b> ${esc(t.answer)}</div>`);
+    if(!t.query && !t.answer && t.summary) bodyLines.push(`<div class="tl-a">${esc(t.summary)}</div>`);
+    if(t.status === "error" && t.error) bodyLines.push(`<div class="tl-err">${esc(t.error)}</div>`);
+    if(t.status === "running" && !bodyLines.length) bodyLines.push(`<div class="tl-a">Still running…</div>`);
+    const body = bodyLines.length ? `<div class="tl-body">${bodyLines.join("")}</div>` : "";
+    return `<div class="trace-list-row ${esc(t.status)}">
+      <div class="tl-top">
+        <div class="tl-dot ${esc(t.status)}"></div>
+        <div class="tl-status ${esc(t.status)}">${esc(t.status)}</div>
+        ${namePill}
+        ${rolePill}
+        <div class="tl-time">${esc(timeAgo(t.start_time))}</div>
+        <div class="tl-lat">${esc(lat)}</div>
+        ${link}
+      </div>
+      ${body}
+    </div>`;
+  }).join("");
+}
+
+async function loadTraces(pollsLeft){
+  const box = $("tracesList");
+  if(box && pollsLeft === undefined) box.innerHTML = `<div class="trace-empty">Loading…</div>`;
+  const data = await getJSON("/traces?limit=25");
+  renderTracesList(data);
+
+  const stillRunning = (data.traces || []).some(t => t.status === "running");
+  const remaining = pollsLeft === undefined ? 6 : pollsLeft - 1;
+  if(stillRunning && remaining > 0){
+    setTimeout(() => loadTraces(remaining), 4000);
+  }
+}
 
 async function connect(){V("Connecting to production index…");const r=await call("/connect","POST",{size:+$("size").value});
-  V(r.message,"warn");resetStats();$("foot").textContent="Embedder in use: "+r.embedder+" · "+$("foot").textContent.split('·').slice(1).join('·');}
+  V(r.message,"warn");resetStats();$("foot").textContent="Embedder in use: "+r.embedder+" · "+$("foot").textContent.split('·').slice(1).join('·');
+  loadTraces();}
 function resetStats(){["s_total","s_pii","s_pct","c_re","c_q","c_after"].forEach(i=>$(i).textContent="—");$("bars").innerHTML="";}
 
 async function scan(){V("Scanning uncapped — every vector…");const s=await call("/scan","POST",{});
@@ -230,7 +355,8 @@ async function scan(){V("Scanning uncapped — every vector…");const s=await c
   const max=Math.max(1,...Object.values(s.by_type||{}));
   $("bars").innerHTML=Object.entries(s.by_type||{}).sort((a,b)=>b[1]-a[1]).map(([k,v])=>
     `<div class="bar"><div class="lab">${k}</div><div class="track"><div class="fill" style="width:${100*v/max}%"></div></div><div class="val">${v}</div></div>`).join("");
-  V(`Scan complete — ${s.total_pii_instances.toLocaleString()} PII instances across ${s.vectors_with_pii.toLocaleString()} vectors`,"warn");}
+  V(`Scan complete — ${s.total_pii_instances.toLocaleString()} PII instances across ${s.vectors_with_pii.toLocaleString()} vectors`,"warn");
+  loadTraces();}
 
 async function scanLastPdf(){V("Scanning only the most recently uploaded PDF…");const s=await call("/scan_last_pdf","POST",{});
   $("s_total").textContent=s.total_vectors.toLocaleString();
@@ -239,7 +365,8 @@ async function scanLastPdf(){V("Scanning only the most recently uploaded PDF…"
   const max=Math.max(1,...Object.values(s.by_type||{}));
   $("bars").innerHTML=Object.entries(s.by_type||{}).sort((a,b)=>b[1]-a[1]).map(([k,v])=>
     `<div class="bar"><div class="lab">${k}</div><div class="track"><div class="fill" style="width:${100*v/max}%"></div></div><div class="val">${v}</div></div>`).join("");
-  V(s.message || `Scanned ${s.scanned_vectors||0} vectors from the last uploaded PDF`, s.total_pii_instances ? "warn" : "ok");}
+  V(s.message || `Scanned ${s.scanned_vectors||0} vectors from the last uploaded PDF`, s.total_pii_instances ? "warn" : "ok");
+  loadTraces();}
 
 let selectedPdfDataUrl = "";
 
@@ -257,6 +384,7 @@ async function uploadPdf(){
     if(res.error){V(`Upload failed: ${res.error}`,'warn');return;}
     V(`${res.message} (${res.pdf_chunks||res.uploaded} chunks)`,'ok');
     $("pdfName").textContent = file.name;
+    loadTraces();
   };
   reader.onerror = () => V("Could not read PDF file","warn");
   reader.readAsDataURL(file);
@@ -315,7 +443,62 @@ dropzone.addEventListener("drop", e => {
 async function clean(){V("Cleaning — re-embedding poisoned subset…");const c=await call("/clean","POST",{});
   $("c_re").textContent=c.reembedded; $("c_q").textContent=c.quarantined; $("c_after").textContent=c.pii_after;
   $("s_pii").textContent=c.pii_after; $("s_pct").textContent="0%";
-  V(`Cleaned: ${c.reembedded} vectors re-embedded, PII now ${c.pii_after} (was flagged). Retrieval preserved.`,"ok");}
+  V(`Cleaned: ${c.reembedded} vectors re-embedded, PII now ${c.pii_after} (was flagged). Retrieval preserved.`,"ok");
+  loadTraces();}
+
+function renderTrace(q){
+  const box = $("traceout"), meta = $("traceMeta");
+  const t = q.trace || {};
+
+  meta.innerHTML = `<span class="ls-badge${t.enabled ? ' on' : ''}"><span class="dot"></span>${t.enabled ? 'LangSmith' : 'tracing off'}</span>`;
+
+  if(!q.spans || !q.spans.length){
+    box.innerHTML = "No trace spans returned."
+      + (t.url ? `<div style="margin-top:8px"><a class="ls-link" href="${esc(t.url)}" target="_blank">Open full trace in LangSmith ↗</a></div>` : "");
+    return;
+  }
+
+  const spans = [...q.spans].sort((a,b)=>a.start_ms-b.start_ms || a.id-b.id);
+  const byId = new Map(spans.map(s=>[s.id,s]));
+  const depthOf = span => {
+    let depth = 0;
+    let parentId = span.parent_id;
+    while(parentId != null){
+      const parent = byId.get(parentId);
+      if(!parent) break;
+      depth += 1;
+      parentId = parent.parent_id;
+    }
+    return depth;
+  };
+
+  const traceStart = Math.min(...spans.map(s=>s.start_ms));
+  const traceEnd = Math.max(...spans.map(s=>s.start_ms + s.duration_ms));
+  const total = Math.max(1, traceEnd - traceStart);
+  const lsLink = t.url
+    ? `<a class="ls-link" href="${esc(t.url)}" target="_blank">Open in LangSmith ↗</a>`
+    : (t.enabled ? `<span style="color:var(--mute)">${esc(t.trace_id ? t.trace_id.slice(0,8) : 'no run id')}</span>` : '');
+  const header = `
+    <div class="trace-header">
+      <span>${esc(t.enabled ? "Tracing enabled" : "Tracing disabled")}${t.exporter ? ` via ${esc(t.exporter)}` : ""}</span>
+      <span>${lsLink || (esc(q.answer_source || "unknown") + (q.llm_model ? ` · ${esc(q.llm_model)}` : ""))}</span>
+    </div>`;
+  const rows = spans.map(span => {
+    const depth = depthOf(span);
+    const left = 100 * (span.start_ms - traceStart) / total;
+    const width = Math.max(1, 100 * span.duration_ms / total);
+    const attrs = span.attrs && Object.keys(span.attrs).length ? ` title="${esc(JSON.stringify(span.attrs))}"` : "";
+    return `<div class="trace-row"${attrs}>
+      <div class="tname" style="padding-left:${depth * 14}px">${esc(span.name)}${span.error ? ' <span class="terr">ERROR</span>' : ''}</div>
+      <div class="ttrack"><div class="tbar" style="left:${left}%;width:${width}%"></div></div>
+      <div class="tdur">${span.duration_ms}ms</div>
+    </div>`;
+  }).join("");
+  const footer = t.url
+    ? `<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--line)"><a class="ls-link" href="${esc(t.url)}" target="_blank">Open full trace in LangSmith ↗</a></div>`
+    : "";
+  box.innerHTML = header + rows + footer;
+}
 
 async function query(){
   const role = $("role").value;
@@ -323,7 +506,9 @@ async function query(){
   if(!queryText){V("Enter a query before running","warn");return;}
   V("Querying as "+role+"…");
   const q = await call("/query","POST",{role, query: queryText});
-  if(q.error){V(`Query failed: ${q.error}`,'warn');return;}
+  if(q.error){$("traceout").textContent = "Trace unavailable because the query failed.";$("traceMeta").textContent = "";V(`Query failed: ${q.error}`,'warn');return;}
+
+  renderTrace(q);
 
   let out = `Query: ${esc(q.query || queryText)}\n`;
   out += `Answer: ${esc(q.answer || "No answer returned")}\n\n`;
@@ -334,6 +519,7 @@ async function query(){
 
   $("qout").innerHTML = out.replace(/\n/g, "<br>");
   V(`${role}: ${q.results.length} results · ${q.governed?"governed (role-gated)":"UNGOVERNED (raw PII visible)"}`, q.governed?"ok":"warn");
+  loadTraces();
 }
 
 async function wipeIndex(){
@@ -343,11 +529,15 @@ async function wipeIndex(){
   if(r.error){V(`Wipe failed: ${r.error}`,'warn');return;}
   resetStats();
   V(r.message,'warn');
+  loadTraces();
 }
 
 async function erase(){const s=$("subject").value.trim();if(!s){V("Enter a subject name","warn");return;}
   V("Crypto-shredding "+s+"…");const r=await call("/erase","POST",{subject:s});
-  $("eout").textContent=r.message;V(r.message,r.executed?"ok":"warn");}
+  $("eout").textContent=r.message;V(r.message,r.executed?"ok":"warn");
+  loadTraces();}
+
+loadTraces();
 </script><div id="pdfBackdrop" class="modal-backdrop" onclick="closePdfPreview()">
   <div class="modal" onclick="event.stopPropagation()">
     <div class="modal-header">
