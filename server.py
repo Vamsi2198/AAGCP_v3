@@ -43,7 +43,9 @@ from aagcp.detect.detector import PIIDetector
 from aagcp.embed.embedders import auto_embedder
 from aagcp.store.connectors import PineconeConnector, VectorRecord
 from aagcp.vault import PseudonymVault
+from dotenv import load_dotenv
 
+load_dotenv()  # Load environment variables from .env file
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
