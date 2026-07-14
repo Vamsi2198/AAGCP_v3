@@ -1,14 +1,16 @@
-numpy
-pyyaml
-reportlab
-python-dotenv
-pinecone
-pdfplumber
-# Optional — only used if OPENAI_API_KEY is set (API embeddings, no torch):
-openai
-traceloop-sdk
-opentelemetry-exporter-otlp
-# Production backends (install only what you connect to):
-# presidio-analyzer   presidio-anonymizer   # global NER (names/addresses)
-# sentence-transformers                      # local embeddings (needs more RAM)
-# qdrant-client | psycopg[binary]            # alternate vector DB connectors
+    numpy
+    pyyaml
+    reportlab
+    python-dotenv
+    pinecone
+    pdfplumber
+    # Optional — only used if OPENAI_API_KEY is set (API embeddings, no torch):
+    openai
+    traceloop-sdk
+    opentelemetry-exporter-otlp
+    # Tracing — only used if LANGSMITH_API_KEY is set:
+    langsmith
+    # Production backends (install only what you connect to):
+    # presidio-analyzer   presidio-anonymizer   # global NER (names/addresses)
+    # sentence-transformers                      # local embeddings (needs more RAM)
+    # qdrant-client | psycopg[binary]            # alternate vector DB connectors
