@@ -306,7 +306,7 @@ def _coalesce_chunks(chunks: list[dict], max_chunks: int, page_num: int, strateg
 
 
 def chunk_page(page, doc_name: str, page_num: int):
-    max_chunks_per_page = max(1, int(os.getenv("AAGCP_MAX_CHUNKS_PER_PAGE", "12")))
+    max_chunks_per_page = max(1, int(os.getenv("AAGCP_MAX_CHUNKS_PER_PAGE", "10")))
     text = page.extract_text() or ""
     if looks_like_json_lines(text):
         chunks = chunk_json_lines(text, doc_name, page_num)
@@ -1250,7 +1250,7 @@ class Engine:
             safe_stem = _safe_id_component(Path(filename).stem)
             embed_batch_size = max(1, int(os.getenv("AAGCP_EMBED_BATCH", "8")))
             upsert_batch_size = max(1, int(os.getenv("AAGCP_UPSERT_BATCH", "25")))
-            max_upload_chunks = max(1, int(os.getenv("AAGCP_MAX_UPLOAD_CHUNKS", "1200")))
+            max_upload_chunks = max(1, int(os.getenv("AAGCP_MAX_UPLOAD_CHUNKS", "1000")))
             logger.info(
                 f"[UPLOAD] Batch config: embed_batch_size={embed_batch_size}, "
                 f"upsert_batch_size={upsert_batch_size}, "
