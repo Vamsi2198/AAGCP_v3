@@ -1182,21 +1182,6 @@ class Engine:
             self.last_uploaded_pdf_filename = filename
             logger.info(f"[UPLOAD] Just upserted {len(new_ids)} ids, first 3: {new_ids[:3]}")
 
-            stats_now = self._pinecone_index.describe_index_stats()
-            logger.info(f"[UPLOAD] describe_index_stats immediately after upsert: {stats_now}")
-
-            fetch_now = self._pinecone_index.fetch(ids=new_ids[:3], namespace=self.store._ns or None)
-            logger.info(f"[UPLOAD] fetch() immediately after upsert: {fetch_now}")
-
-            import time
-            time.sleep(10)
-
-            stats_later = self._pinecone_index.describe_index_stats()
-            logger.info(f"[UPLOAD] describe_index_stats 10s later: {stats_later}")
-
-            fetch_later = self._pinecone_index.fetch(ids=new_ids[:3], namespace=self.store._ns or None)
-            logger.info(f"[UPLOAD] fetch() 10s later: {fetch_later}")
-
             logger.info(f"[UPLOAD] Inserted {len(records)} PDF chunks into index")
             return {"uploaded": len(records), "filename": filename,
                     "pdf_chunks": len(records), "message": "PDF ingested successfully."}

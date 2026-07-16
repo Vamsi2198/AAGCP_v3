@@ -270,8 +270,45 @@ function color(s){return esc(s)
   .replace(/\[ERASED-GDPR\]/g,'<span class="er">[ERASED-GDPR]</span>')
   .replace(/(&lt;[A-Z_]+_[0-9a-f]+&gt;)/g,'<span class="tok">$1</span>')
   .replace(/(Aadhaar|PAN|SSN|card|phone) ([^,<]+)/g,(m,a,b)=> /[&]/.test(b)?m:a+' <span class="raw">'+b+'</span>');}
-async function call(p,m,b){try{const r=await fetch(p,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined});return await r.json();}catch(e){return{error:String(e)};}}
-async function getJSON(p){try{const r=await fetch(p);return await r.json();}catch(e){return{error:String(e)};}}
+async function call(p,m,b){
+  try{
+    const r=await fetch(p,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined});
+    const txt=await r.text();
+    let data={};
+    if(txt){
+      try{data=JSON.parse(txt);}catch(_){
+        return {error:`HTTP ${r.status}: ${txt.slice(0,220) || 'Non-JSON response'}`};
+      }
+    }
+    if(!r.ok){
+      const detail=(data && (data.detail || data.error || data.message)) || txt || `HTTP ${r.status}`;
+      return {error:`HTTP ${r.status}: ${String(detail).slice(0,220)}`};
+    }
+    return data;
+  }catch(e){
+    return{error:String(e)};
+  }
+}
+
+async function getJSON(p){
+  try{
+    const r=await fetch(p);
+    const txt=await r.text();
+    if(!txt) return r.ok ? {} : {error:`HTTP ${r.status}: empty response`};
+    try{
+      const data=JSON.parse(txt);
+      if(!r.ok){
+        const detail=(data && (data.detail || data.error || data.message)) || txt || `HTTP ${r.status}`;
+        return {error:`HTTP ${r.status}: ${String(detail).slice(0,220)}`};
+      }
+      return data;
+    }catch(_){
+      return {error:`HTTP ${r.status}: ${txt.slice(0,220)}`};
+    }
+  }catch(e){
+    return{error:String(e)};
+  }
+}
 
 function timeAgo(iso){
   if(!iso) return "";
