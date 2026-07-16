@@ -419,6 +419,9 @@ async function waitForUploadJob(jobId, maxAttempts = 180){
   for(let i=0;i<maxAttempts;i++){
     const st = await getJSON(`/upload_status?job_id=${encodeURIComponent(jobId)}`);
     if(st.error) return st;
+    if(st.status === "running" && st.message){
+      V(st.message, "warn");
+    }
     if(st.status === "done") return st.result || {message:"Upload completed."};
     if(st.status === "error") return {error: st.error || "Upload job failed"};
     await new Promise(resolve => setTimeout(resolve, 2000));

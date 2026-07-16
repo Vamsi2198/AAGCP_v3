@@ -966,6 +966,12 @@ class Engine:
         self._upload_jobs: dict[str, dict] = {}
         self._upload_jobs_lock = threading.Lock()
 
+    def _set_upload_job(self, job_id: str, **fields):
+        with self._upload_jobs_lock:
+            cur = self._upload_jobs.get(job_id, {})
+            cur.update(fields)
+            self._upload_jobs[job_id] = cur
+
     @workflow(name="connect_index")
     def reset(self, seed: int = 1) -> dict:
         logger.info(f"[RESET] Resetting engine with seed={seed}")
@@ -1169,7 +1175,7 @@ class Engine:
 
     def _upload_pdf_job_worker(self, job_id: str, filename: str, content_b64: str):
         try:
-            result = self._upload_pdf_impl(filename, content_b64)
+            result = self._upload_pdf_impl(filename, content_b64, job_id=job_id)
             with self._upload_jobs_lock:
                 self._upload_jobs[job_id] = {
                     "status": "done",
@@ -1187,16 +1193,24 @@ class Engine:
                     "error": f"{type(exc).__name__}: {exc}",
                 }
 
-    def _upload_pdf_impl(self, filename: str, content_b64: str) -> dict:
+    def _upload_pdf_impl(self, filename: str, content_b64: str, job_id: str | None = None) -> dict:
         logger.info(f"[UPLOAD] Ingesting PDF file: {filename}")
         try:
+            if job_id:
+                self._set_upload_job(job_id, message="Decoding PDF payload…", phase="decode")
             data = base64.b64decode(content_b64)
+
+            if job_id:
+                self._set_upload_job(job_id, message="Extracting and chunking PDF text…", phase="chunk")
             chunk_items = chunk_pdf_bytes(data, filename)
 
             if not chunk_items:
                 return {"uploaded": 0, "message": "No text could be extracted from the PDF."}
 
-            records = []
+            if job_id:
+                self._set_upload_job(job_id, message=f"Preparing {len(chunk_items)} chunks…", phase="prepare", total_chunks=len(chunk_items))
+
+            staged = []
             safe_stem = _safe_id_component(Path(filename).stem)
             for chunk_index, chunk_item in enumerate(chunk_items, start=1):
                 text = chunk_item.get("text", "").strip()
@@ -1204,7 +1218,6 @@ class Engine:
                     continue
                 record_id = (f"pdf:{safe_stem}:{chunk_item.get('page', 0):03d}:"
                              f"{chunk_index:03d}:{chunk_item.get('chunk_type','chunk')}")
-                logger.info(f"[UPLOAD] record_id={record_id!r}")
                 # Build metadata but omit keys with None values to avoid
                 # sending nulls to Pinecone (which rejects null metadata values).
                 metadata = {
@@ -1221,15 +1234,38 @@ class Engine:
                 docv = chunk_item.get("doc")
                 if docv is not None:
                     metadata["doc"] = docv
-                records.append(VectorRecord(
-                    record_id,
-                    self.embedder.embed(text),
-                    text,
-                    metadata
-                ))
+                staged.append((record_id, text, metadata))
 
-            for i in range(0, len(records), 50):
-                self.store.upsert(records[i:i+50])
+            records = []
+            embed_batch_size = int(os.getenv("AAGCP_EMBED_BATCH", "64"))
+            upsert_batch_size = int(os.getenv("AAGCP_UPSERT_BATCH", "200"))
+
+            if job_id:
+                self._set_upload_job(job_id, message=f"Embedding {len(staged)} chunks…", phase="embed", total_chunks=len(staged), embedded=0)
+
+            for i in range(0, len(staged), max(1, embed_batch_size)):
+                batch = staged[i:i + max(1, embed_batch_size)]
+                texts = [t for _, t, _ in batch]
+                embeddings = self.embedder.embed_batch(texts)
+                for (record_id, text, metadata), emb in zip(batch, embeddings):
+                    records.append(VectorRecord(record_id, emb, text, metadata))
+
+                if job_id and ((i // max(1, embed_batch_size)) % 2 == 0 or i + len(batch) >= len(staged)):
+                    self._set_upload_job(
+                        job_id,
+                        message=f"Embedding chunks… {min(i + len(batch), len(staged))}/{len(staged)}",
+                        embedded=min(i + len(batch), len(staged)),
+                    )
+
+            if job_id:
+                self._set_upload_job(job_id, message=f"Upserting {len(records)} vectors…", phase="upsert", upserted=0, total_chunks=len(records))
+
+            for i in range(0, len(records), max(1, upsert_batch_size)):
+                batch = records[i:i + max(1, upsert_batch_size)]
+                self.store.upsert(batch)
+                if job_id:
+                    done = min(i + len(batch), len(records))
+                    self._set_upload_job(job_id, message=f"Upserting vectors… {done}/{len(records)}", upserted=done)
 
             new_ids = [r.id for r in records]
             self.last_uploaded_ids = new_ids
@@ -1519,17 +1555,28 @@ STATE = Engine()
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 
+    @staticmethod
+    def _is_client_disconnect(exc: Exception) -> bool:
+        return isinstance(exc, (BrokenPipeError, ConnectionResetError))
+
     def _send(self, code, payload, ctype="application/json"):
         body = payload if isinstance(payload, bytes) else json.dumps(payload, default=str).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
-        self.send_header("Pragma", "no-cache")
-        self.send_header("Expires", "0")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
+            self.end_headers()
+            self.wfile.write(body)
+            return True
+        except Exception as exc:
+            if self._is_client_disconnect(exc):
+                logger.info(f"[HTTP] Client disconnected before response could be sent ({type(exc).__name__})")
+                return False
+            raise
 
     def _body(self):
         n = int(self.headers.get("Content-Length", 0) or 0)
@@ -1620,6 +1667,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, {"error": "not found"})
         except Exception as e:
             logger.error(f"[HTTP] 500 Error on {self.path}: {type(e).__name__}: {e}", exc_info=True)
+            if self._is_client_disconnect(e):
+                logger.info(f"[HTTP] Skipping error response because client already disconnected ({type(e).__name__})")
+                return
             return self._send(500, {"error": type(e).__name__, "detail": str(e)})
 
 
