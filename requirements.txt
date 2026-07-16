@@ -7,6 +7,7 @@
     # Optional — only used if OPENAI_API_KEY is set (API embeddings, no torch):
     openai
     traceloop-sdk
+    arize-phoenix
     opentelemetry-exporter-otlp
     # Tracing — only used if LANGSMITH_API_KEY is set:
     langsmith
