@@ -299,13 +299,16 @@ def chunk_page(page, doc_name: str, page_num: int):
 
 
 def chunk_pdf_bytes(data: bytes, filename: str):
+    return list(iter_pdf_chunks(data, filename))
+
+
+def iter_pdf_chunks(data: bytes, filename: str):
     doc_name = Path(filename).name
-    all_chunks = []
     import pdfplumber
     with pdfplumber.open(io.BytesIO(data)) as pdf:
         for page_num, page in enumerate(pdf.pages, start=1):
-            all_chunks.extend(chunk_page(page, doc_name, page_num))
-    return all_chunks
+            for chunk in chunk_page(page, doc_name, page_num):
+                yield chunk
 
 # Load environment variables from .env file
 load_dotenv()
@@ -1202,24 +1205,64 @@ class Engine:
 
             if job_id:
                 self._set_upload_job(job_id, message="Extracting and chunking PDF text…", phase="chunk")
-            chunk_items = chunk_pdf_bytes(data, filename)
 
-            if not chunk_items:
-                return {"uploaded": 0, "message": "No text could be extracted from the PDF."}
+            safe_stem = _safe_id_component(Path(filename).stem)
+            embed_batch_size = max(1, int(os.getenv("AAGCP_EMBED_BATCH", "16")))
+            upsert_batch_size = max(1, int(os.getenv("AAGCP_UPSERT_BATCH", "50")))
 
             if job_id:
-                self._set_upload_job(job_id, message=f"Preparing {len(chunk_items)} chunks…", phase="prepare", total_chunks=len(chunk_items))
+                self._set_upload_job(
+                    job_id,
+                    message="Preparing chunks for embedding…",
+                    phase="prepare",
+                    embedded=0,
+                    upserted=0,
+                )
 
             staged = []
-            safe_stem = _safe_id_component(Path(filename).stem)
-            for chunk_index, chunk_item in enumerate(chunk_items, start=1):
-                text = chunk_item.get("text", "").strip()
+            new_ids = []
+            seen_chunks = 0
+            embedded_count = 0
+            upserted_count = 0
+            record_seq = 0
+
+            def flush_staged_batches():
+                nonlocal staged, embedded_count, upserted_count
+                if not staged:
+                    return
+
+                texts = [t for _, t, _ in staged]
+                embeddings = self.embedder.embed_batch(texts)
+                embedded_count += len(staged)
+
+                vectors = []
+                for (record_id, text, metadata), emb in zip(staged, embeddings):
+                    vectors.append(VectorRecord(record_id, emb, text, metadata))
+
+                for i in range(0, len(vectors), upsert_batch_size):
+                    batch = vectors[i:i + upsert_batch_size]
+                    self.store.upsert(batch)
+                    upserted_count += len(batch)
+                    if job_id:
+                        self._set_upload_job(
+                            job_id,
+                            phase="upsert",
+                            message=f"Upserting vectors… {upserted_count}",
+                            embedded=embedded_count,
+                            upserted=upserted_count,
+                        )
+
+                staged = []
+
+            for chunk_item in iter_pdf_chunks(data, filename):
+                seen_chunks += 1
+                text = (chunk_item.get("text") or "").strip()
                 if not text:
                     continue
+
+                record_seq += 1
                 record_id = (f"pdf:{safe_stem}:{chunk_item.get('page', 0):03d}:"
-                             f"{chunk_index:03d}:{chunk_item.get('chunk_type','chunk')}")
-                # Build metadata but omit keys with None values to avoid
-                # sending nulls to Pinecone (which rejects null metadata values).
+                             f"{record_seq:03d}:{chunk_item.get('chunk_type','chunk')}")
                 metadata = {
                     "source": "pdf",
                     "pdf_filename": filename,
@@ -1227,54 +1270,41 @@ class Engine:
                     "chunk_type": chunk_item.get("chunk_type", "full_page_fallback"),
                     "ingested": "pdf_upload"
                 }
-                # Only include record_id and doc when they are non-null.
                 rid = chunk_item.get("record_id")
                 if rid is not None:
                     metadata["record_id"] = str(rid)
                 docv = chunk_item.get("doc")
                 if docv is not None:
                     metadata["doc"] = docv
+
                 staged.append((record_id, text, metadata))
+                new_ids.append(record_id)
 
-            records = []
-            embed_batch_size = int(os.getenv("AAGCP_EMBED_BATCH", "64"))
-            upsert_batch_size = int(os.getenv("AAGCP_UPSERT_BATCH", "200"))
-
-            if job_id:
-                self._set_upload_job(job_id, message=f"Embedding {len(staged)} chunks…", phase="embed", total_chunks=len(staged), embedded=0)
-
-            for i in range(0, len(staged), max(1, embed_batch_size)):
-                batch = staged[i:i + max(1, embed_batch_size)]
-                texts = [t for _, t, _ in batch]
-                embeddings = self.embedder.embed_batch(texts)
-                for (record_id, text, metadata), emb in zip(batch, embeddings):
-                    records.append(VectorRecord(record_id, emb, text, metadata))
-
-                if job_id and ((i // max(1, embed_batch_size)) % 2 == 0 or i + len(batch) >= len(staged)):
+                if job_id and seen_chunks % 25 == 0:
                     self._set_upload_job(
                         job_id,
-                        message=f"Embedding chunks… {min(i + len(batch), len(staged))}/{len(staged)}",
-                        embedded=min(i + len(batch), len(staged)),
+                        phase="embed",
+                        message=f"Chunked {seen_chunks} segments… embedding in batches",
+                        seen_chunks=seen_chunks,
+                        embedded=embedded_count,
+                        upserted=upserted_count,
                     )
 
-            if job_id:
-                self._set_upload_job(job_id, message=f"Upserting {len(records)} vectors…", phase="upsert", upserted=0, total_chunks=len(records))
+                if len(staged) >= embed_batch_size:
+                    flush_staged_batches()
 
-            for i in range(0, len(records), max(1, upsert_batch_size)):
-                batch = records[i:i + max(1, upsert_batch_size)]
-                self.store.upsert(batch)
-                if job_id:
-                    done = min(i + len(batch), len(records))
-                    self._set_upload_job(job_id, message=f"Upserting vectors… {done}/{len(records)}", upserted=done)
+            flush_staged_batches()
 
-            new_ids = [r.id for r in records]
+            if not new_ids:
+                return {"uploaded": 0, "message": "No text could be extracted from the PDF."}
+
             self.last_uploaded_ids = new_ids
             self.last_uploaded_pdf_filename = filename
             logger.info(f"[UPLOAD] Just upserted {len(new_ids)} ids, first 3: {new_ids[:3]}")
 
-            logger.info(f"[UPLOAD] Inserted {len(records)} PDF chunks into index")
-            return {"uploaded": len(records), "filename": filename,
-                    "pdf_chunks": len(records), "message": "PDF ingested successfully."}
+            logger.info(f"[UPLOAD] Inserted {len(new_ids)} PDF chunks into index")
+            return {"uploaded": len(new_ids), "filename": filename,
+                    "pdf_chunks": len(new_ids), "message": "PDF ingested successfully."}
         except Exception as e:
             logger.error(f"[UPLOAD] Error ingesting PDF: {type(e).__name__}: {e}")
             raise
