@@ -601,10 +601,15 @@ def _sanitize_metadata_for_role(metadata: dict, role: str) -> dict:
     return dict(metadata or {})
 
 
-def _fallback_answer(results: list[dict]) -> str:
+def _fallback_answer(results: list[dict], role: str) -> str:
     if not results:
         return ""
-    return (results[0].get("text") or results[0].get("source_text") or "")[:220]
+    for item in results:
+        candidate = (item.get("text") or item.get("source_text") or "").strip()
+        if candidate:
+            return candidate[:220]
+    # Analyst role intentionally sees withheld chunks.
+    return "[hidden]" if role == "ANALYST_ROLE" else ""
 
 
 def _build_llm_context(results: list[dict], max_chunks: int = 5, max_chars: int = 4000) -> str:
@@ -636,7 +641,12 @@ def _drop_pdf_bytes(inputs: dict) -> dict:
 
 @workflow(name="governed_answer_generation")
 def _generate_answer(query_text: str, role: str, governed: bool, results: list[dict]) -> tuple[str, str, str | None]:
-    fallback = _fallback_answer(results)
+    fallback = _fallback_answer(results, role)
+
+    # Analyst role should never receive synthesized content from hidden chunks.
+    if role == "ANALYST_ROLE":
+        return (fallback or "[hidden]"), "policy_hidden", None
+
     context = _build_llm_context(results)
     if not context:
         return fallback, "top_chunk", None
@@ -1088,8 +1098,8 @@ class Engine:
                     results = []
                     for h in hits:
                         if role == "ANALYST_ROLE":
-                            text = ""
-                            source_text = ""
+                            text = "[hidden]"
+                            source_text = "[hidden]"
                         elif is_finance:
                             text = h.get("text") or ""
                             source_text = text

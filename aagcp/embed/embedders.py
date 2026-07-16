@@ -9,10 +9,15 @@ SentenceTransformerEmbedder — real model (all-MiniLM-L6-v2 etc.); written
 
 from __future__ import annotations
 import hashlib
+import os
 import re
+import logging
 from abc import ABC, abstractmethod
 from typing import List
 import numpy as np
+
+
+logger = logging.getLogger(__name__)
 
 
 class EmbedderAdapter(ABC):
@@ -55,9 +60,9 @@ class SentenceTransformerEmbedder(EmbedderAdapter):
     """
     name = "sentence_transformers"
 
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2", local_files_only: bool = True):
         from sentence_transformers import SentenceTransformer
-        self._m = SentenceTransformer(model_name)
+        self._m = SentenceTransformer(model_name, local_files_only=local_files_only)
         self.dim = self._m.get_sentence_embedding_dimension()
 
     def embed(self, text: str) -> np.ndarray:
@@ -100,20 +105,33 @@ def auto_embedder(dim: int = 384):
       else                              -> HashingEmbedder (dependency-free, always runs)
     This is what lets the same app run on a laptop, a free-tier host, or prod.
     """
-    import os
-    
+    # Optional explicit override:
+    #   AAGCP_EMBEDDER=openai|sentence_transformers|hashing
+    selected = (os.getenv("AAGCP_EMBEDDER") or "").strip().lower()
+
+    if selected in {"hash", "hashing"}:
+        return HashingEmbedder(dim)
+
     # Try OpenAI only if dimension matches (1536 for small, 3072 for large)
-    if os.environ.get("OPENAI_API_KEY") and dim in (1536, 3072):
+    if (selected in {"openai"} or not selected) and os.environ.get("OPENAI_API_KEY") and dim in (1536, 3072):
         try:
             return OpenAIEmbedder()
-        except Exception:
-            pass
-    
-    # Try SentenceTransformer for other dimensions
-    try:
-        return SentenceTransformerEmbedder()
-    except Exception:
-        pass
-    
+        except Exception as exc:
+            logger.warning(f"[EMBEDDER] OpenAI embedder unavailable, falling back: {type(exc).__name__}: {exc}")
+
+    # SentenceTransformers can trigger long remote model downloads.
+    # Default to local-files-only so boot stays fast and reliable.
+    # Set AAGCP_ST_LOCAL_ONLY=0 to allow downloads.
+    if selected in {"sentence_transformers", "sentence-transformers", "st"} or not selected:
+        local_only = os.getenv("AAGCP_ST_LOCAL_ONLY", "1").strip().lower() not in {"0", "false", "no", "off"}
+        model_name = os.getenv("AAGCP_ST_MODEL", "all-MiniLM-L6-v2")
+        try:
+            return SentenceTransformerEmbedder(model_name=model_name, local_files_only=local_only)
+        except Exception as exc:
+            logger.warning(
+                "[EMBEDDER] SentenceTransformer unavailable"
+                f" (model={model_name}, local_only={local_only}), falling back: {type(exc).__name__}: {exc}"
+            )
+
     # Fall back to hashing
     return HashingEmbedder(dim)
