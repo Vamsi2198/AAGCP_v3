@@ -268,21 +268,62 @@ def chunk_table_rows(page, doc_name: str, page_num: int):
     return all_chunks or None
 
 
+def _coalesce_chunks(chunks: list[dict], max_chunks: int, page_num: int, strategy: str) -> list[dict]:
+    """Reduce per-page chunk explosions by merging neighboring chunks.
+
+    This keeps ingestion memory/CPU predictable on small instances.
+    """
+    if not chunks or len(chunks) <= max_chunks:
+        return chunks
+
+    step = max(1, (len(chunks) + max_chunks - 1) // max_chunks)
+    merged: list[dict] = []
+
+    for i in range(0, len(chunks), step):
+        group = chunks[i:i + step]
+        first = group[0]
+        last = group[-1]
+        first_id = first.get("record_id")
+        last_id = last.get("record_id")
+        if first_id and last_id and first_id != last_id:
+            merged_id = f"{first_id}_{last_id}"
+        else:
+            merged_id = first_id or last_id
+
+        merged.append({
+            "doc": first.get("doc"),
+            "page": first.get("page"),
+            "chunk_type": f"{first.get('chunk_type', 'chunk')}+merged",
+            "record_id": merged_id,
+            "text": "\n".join([(g.get("text") or "").strip() for g in group if (g.get("text") or "").strip()]),
+        })
+
+    logger.info(
+        f"[CHUNKING] Page {page_num}: {strategy} reduced {len(chunks)} -> {len(merged)} "
+        f"(max_per_page={max_chunks})"
+    )
+    return merged
+
+
 def chunk_page(page, doc_name: str, page_num: int):
+    max_chunks_per_page = max(1, int(os.getenv("AAGCP_MAX_CHUNKS_PER_PAGE", "12")))
     text = page.extract_text() or ""
     if looks_like_json_lines(text):
         chunks = chunk_json_lines(text, doc_name, page_num)
         if chunks:
+            chunks = _coalesce_chunks(chunks, max_chunks_per_page, page_num, "JSON-lines strategy")
             logger.info(f"[CHUNKING] Page {page_num}: JSON-lines strategy -> {len(chunks)} chunks")
             return chunks
 
     chunks = chunk_by_header_pattern(text, doc_name, page_num)
     if chunks:
+        chunks = _coalesce_chunks(chunks, max_chunks_per_page, page_num, "Header-marker strategy")
         logger.info(f"[CHUNKING] Page {page_num}: Header-marker strategy -> {len(chunks)} chunks")
         return chunks
 
     chunks = chunk_table_rows(page, doc_name, page_num)
     if chunks:
+        chunks = _coalesce_chunks(chunks, max_chunks_per_page, page_num, "Table-row strategy")
         logger.info(f"[CHUNKING] Page {page_num}: Table-row strategy -> {len(chunks)} chunks")
         return chunks
 
@@ -1207,8 +1248,14 @@ class Engine:
                 self._set_upload_job(job_id, message="Extracting and chunking PDF text…", phase="chunk")
 
             safe_stem = _safe_id_component(Path(filename).stem)
-            embed_batch_size = max(1, int(os.getenv("AAGCP_EMBED_BATCH", "16")))
-            upsert_batch_size = max(1, int(os.getenv("AAGCP_UPSERT_BATCH", "50")))
+            embed_batch_size = max(1, int(os.getenv("AAGCP_EMBED_BATCH", "8")))
+            upsert_batch_size = max(1, int(os.getenv("AAGCP_UPSERT_BATCH", "25")))
+            max_upload_chunks = max(1, int(os.getenv("AAGCP_MAX_UPLOAD_CHUNKS", "1200")))
+            logger.info(
+                f"[UPLOAD] Batch config: embed_batch_size={embed_batch_size}, "
+                f"upsert_batch_size={upsert_batch_size}, "
+                f"max_upload_chunks={max_upload_chunks}"
+            )
 
             if job_id:
                 self._set_upload_job(
@@ -1256,6 +1303,11 @@ class Engine:
 
             for chunk_item in iter_pdf_chunks(data, filename):
                 seen_chunks += 1
+                if seen_chunks > max_upload_chunks:
+                    raise ValueError(
+                        f"Upload exceeds max chunk limit ({max_upload_chunks}). "
+                        f"Reduce document size or increase AAGCP_MAX_UPLOAD_CHUNKS."
+                    )
                 text = (chunk_item.get("text") or "").strip()
                 if not text:
                     continue
@@ -1615,6 +1667,10 @@ class Handler(BaseHTTPRequestHandler):
         except Exception: return {}
 
     def do_GET(self):
+        if self.path == "/ready" or self.path == "/live":
+            # Keep readiness extremely lightweight so platform health checks
+            # can succeed even while background ingestion is active.
+            return self._send(200, {"ok": True})
         if self.path in ("/", "/index.html"):
             return self._send(200, (ROOT / "index.html").read_bytes(), "text/html; charset=utf-8")
         if self.path == "/health":
@@ -1703,6 +1759,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(500, {"error": type(e).__name__, "detail": str(e)})
 
 
+class ResilientThreadingHTTPServer(ThreadingHTTPServer):
+    # Avoid request pileups and prevent non-daemon workers from blocking
+    # process lifecycle during platform-driven restarts.
+    daemon_threads = True
+    block_on_close = False
+    allow_reuse_address = True
+    request_queue_size = 128
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8002))
     logger.info(f"="*80)
@@ -1721,4 +1786,4 @@ if __name__ == "__main__":
     logger.info(f"="*80)
     print(f"\n✓ AAGCP-Vector PRO on :{port}  (embedder={STATE.embedder.name})")
     print(f"✓ Log file: aagcp_server.log\n")
-    ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
+    ResilientThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
