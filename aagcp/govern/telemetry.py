@@ -29,6 +29,7 @@ Semantic convention (attribute namespace `aagcp.*`):
 """
 from __future__ import annotations
 import os
+from urllib.parse import urlsplit, urlunsplit
 from typing import Optional
 
 # OTEL is optional: if not installed / not configured, everything still runs.
@@ -65,6 +66,41 @@ def emit_otel(name: str, attrs: dict, duration_ms: float = 0.0, error: Optional[
         pass
 
 
+def _normalize_otel_http_endpoint(raw: str) -> str:
+    """Normalize an OTLP HTTP endpoint to the traces ingest path.
+
+    Accepts either a base URL (https://host) or a full traces URL
+    (https://host/v1/traces) and returns a clean traces URL.
+    """
+    value = (raw or "").strip().strip("\"'")
+    if not value:
+        return ""
+    parts = urlsplit(value)
+    path = (parts.path or "").rstrip("/")
+    if not path:
+        path = "/v1/traces"
+    elif path != "/v1/traces":
+        path = f"{path}/v1/traces"
+    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+
+
+def _resolve_otel_endpoint() -> str:
+    """Resolve exporter endpoint from standard env vars.
+
+    Preference order:
+    1) OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+    2) OTEL_EXPORTER_OTLP_ENDPOINT
+    """
+    traces_ep = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+    base_ep = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    endpoint = _normalize_otel_http_endpoint(traces_ep or base_ep or "")
+    if endpoint:
+        # Keep both vars aligned so OTEL libs and app code behave consistently.
+        os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = endpoint
+        os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = endpoint
+    return endpoint
+
+
 def add_phoenix() -> str:
     """
     One-call Phoenix wiring. Returns a status string.
@@ -79,9 +115,13 @@ def add_phoenix() -> str:
     """
     if not _OTEL:
         return "OTEL libraries not installed — pip install opentelemetry-sdk opentelemetry-exporter-otlp arize-phoenix"
-    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    endpoint = _resolve_otel_endpoint()
     if not endpoint:
-        return "Set OTEL_EXPORTER_OTLP_ENDPOINT (e.g. http://localhost:6006/v1/traces) to export to Phoenix."
+        return (
+            "Set OTEL_EXPORTER_OTLP_TRACES_ENDPOINT or "
+            "OTEL_EXPORTER_OTLP_ENDPOINT "
+            "(e.g. http://localhost:6006/v1/traces) to export to Phoenix."
+        )
     try:
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
