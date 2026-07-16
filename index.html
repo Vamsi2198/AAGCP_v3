@@ -249,8 +249,8 @@
       </div>
 
       <div class="card">
-        <h2>7 · Recent LangSmith Traces <span class="pill" id="tracesProjectPill"></span></h2>
-        <p class="sub">Every traced operation — upload, connect, scan, clean, query, erase, wipe — straight from your LangSmith project, not just the last query.</p>
+        <h2>7 · Recent Traces <span class="pill" id="tracesProjectPill"></span></h2>
+        <p class="sub">Shows Phoenix directly when configured; otherwise falls back to recent LangSmith traces.</p>
         <div class="row">
           <div style="align-self:flex-end"><button class="b-ghost" onclick="loadTraces()">↻ Refresh</button></div>
         </div>
@@ -333,6 +333,14 @@ function renderTracesList(data){
 async function loadTraces(pollsLeft){
   const box = $("tracesList");
   if(box && pollsLeft === undefined) box.innerHTML = `<div class="trace-empty">Loading…</div>`;
+
+  const target = await getJSON("/trace_target");
+  if(target && target.provider === "phoenix" && target.url){
+    const data = await getJSON("/phoenix_traces?limit=25&project=default");
+    renderTracesList(data);
+    return;
+  }
+
   const data = await getJSON("/traces?limit=25");
   renderTracesList(data);
 

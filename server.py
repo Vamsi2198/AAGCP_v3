@@ -34,7 +34,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urlsplit, urlunsplit, quote
+from urllib.request import Request, urlopen
 from dotenv import load_dotenv
 from pinecone import Pinecone
 from datetime import datetime
@@ -516,6 +517,245 @@ def list_recent_traces(limit: int = 25) -> dict:
         logger.warning(f"[TRACING] Failed to list LangSmith runs: {type(exc).__name__}: {exc}")
         result["error"] = str(exc)
     return result
+
+
+def _phoenix_ui_url() -> str | None:
+    """Resolve the Phoenix UI base URL.
+
+    Preference:
+    1) PHOENIX_UI_URL (explicit override)
+    2) OTEL exporter endpoint host derived from
+       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT / OTEL_EXPORTER_OTLP_ENDPOINT
+    """
+    explicit = (os.getenv("PHOENIX_UI_URL") or "").strip().strip("\"'")
+    if explicit:
+        return explicit.rstrip("/")
+
+    endpoint = (
+        os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+        or ""
+    ).strip().strip("\"'")
+    if not endpoint:
+        return None
+
+    parts = urlsplit(endpoint)
+    if not parts.scheme or not parts.netloc:
+        return None
+    return urlunsplit((parts.scheme, parts.netloc, "", "", "")).rstrip("/")
+
+
+def trace_target_info() -> dict:
+    """Return which trace backend UI should be shown in the frontend."""
+    phoenix_url = _phoenix_ui_url()
+    if phoenix_url:
+        return {"provider": "phoenix", "url": phoenix_url}
+
+    if LANGSMITH_ENABLED:
+        return {
+            "provider": "langsmith",
+            "project": os.environ.get("LANGCHAIN_PROJECT", "aagcp-vector-pro"),
+        }
+
+    return {"provider": "none"}
+
+
+def _parse_iso_utc(ts: str | None):
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _http_get_json(url: str, timeout: float = 12.0) -> dict:
+    req = Request(url, headers={"Accept": "application/json"})
+    with urlopen(req, timeout=timeout) as resp:
+        body = resp.read().decode("utf-8", errors="replace")
+    return json.loads(body)
+
+
+def _phoenix_spans_for_traces(base: str, project: str, trace_ids: list[str]) -> dict[str, list[dict]]:
+    """Fetch spans for many traces with batched requests.
+
+    Phoenix supports repeated trace_id query params; using this avoids one request
+    per trace (N+1 problem) and keeps UI refresh fast.
+    """
+    clean_ids = [tid for tid in trace_ids if tid]
+    if not clean_ids:
+        return {}
+
+    grouped: dict[str, list[dict]] = {tid: [] for tid in clean_ids}
+    project_q = quote(project, safe="")
+
+    # Conservative chunk to avoid very long URLs while still minimizing calls.
+    chunk_size = 20
+    for i in range(0, len(clean_ids), chunk_size):
+        chunk = clean_ids[i:i + chunk_size]
+        trace_qs = "&".join([f"trace_id={quote(tid, safe='')}" for tid in chunk])
+        url = f"{base}/v1/projects/{project_q}/spans?limit=1000&{trace_qs}"
+        payload = _http_get_json(url, timeout=6.0)
+        spans = payload.get("data") or []
+
+        for span in spans:
+            context = span.get("context") or {}
+            tid = context.get("trace_id")
+            if tid in grouped:
+                grouped[tid].append(span)
+
+    return grouped
+
+
+def _aagcp_attrs_from_span(span: dict) -> dict:
+    attrs = span.get("attributes") or {}
+    if not isinstance(attrs, dict):
+        return {}
+
+    nested = attrs.get("aagcp")
+    if isinstance(nested, dict):
+        return nested
+
+    # Some exporters flatten nested objects as aagcp.xxx keys.
+    flat = {}
+    for key, value in attrs.items():
+        if isinstance(key, str) and key.startswith("aagcp."):
+            flat[key.split(".", 1)[1]] = value
+    return flat
+
+
+def _trace_summary_from_spans(spans: list[dict]) -> str:
+    """Build UI-friendly summary from span names + governance attributes."""
+    if not spans:
+        return "no spans"
+
+    aagcp = {}
+    for sp in spans:
+        aagcp = _aagcp_attrs_from_span(sp)
+        if aagcp:
+            break
+
+    parts = []
+    op = aagcp.get("op")
+    if op:
+        parts.append(f"op={op}")
+
+    pii_instances = aagcp.get("pii_instances")
+    if pii_instances is not None:
+        parts.append(f"pii={pii_instances}")
+
+    detector = aagcp.get("detector")
+    if detector:
+        parts.append(f"detector={detector}")
+
+    jurisdictions = aagcp.get("jurisdictions")
+    if jurisdictions:
+        parts.append(f"jurisdictions={jurisdictions}")
+
+    pii_types = aagcp.get("pii_types")
+    if pii_types:
+        text = pii_types if isinstance(pii_types, str) else ",".join([str(x) for x in pii_types])
+        parts.append(f"types={text[:90]}")
+
+    # If no governance attrs exist on spans, show concise operation names.
+    if not parts:
+        names = []
+        for sp in spans:
+            nm = (sp.get("name") or "").strip()
+            if nm and nm not in names:
+                names.append(nm)
+            if len(names) >= 4:
+                break
+        if names:
+            parts.append("ops=" + ", ".join(names))
+
+    parts.append(f"spans={len(spans)}")
+    return " · ".join(parts)
+
+
+def list_phoenix_traces(limit: int = 25, project: str = "default") -> dict:
+    """Fetch traces directly from Phoenix REST API and normalize for the frontend."""
+    base = _phoenix_ui_url()
+    if not base:
+        return {"enabled": False, "project": project, "traces": [], "error": "Phoenix URL not configured"}
+
+    project_q = quote(project, safe="")
+    url = (
+        f"{base}/v1/projects/{project_q}/traces"
+        f"?sort=start_time&order=desc&limit={max(1, min(limit, 200))}&include_spans=true"
+    )
+
+    try:
+        payload = _http_get_json(url)
+        items = payload.get("data") or []
+        traces = []
+        trace_ids = [it.get("trace_id") for it in items if it.get("trace_id")]
+
+        # One batched enrichment fetch instead of one request per trace.
+        try:
+            enriched_spans_by_trace = _phoenix_spans_for_traces(base, project, trace_ids)
+        except Exception:
+            enriched_spans_by_trace = {}
+
+        for item in items:
+            start = item.get("start_time")
+            end = item.get("end_time")
+            start_dt = _parse_iso_utc(start)
+            end_dt = _parse_iso_utc(end)
+            latency_ms = None
+            if start_dt and end_dt:
+                try:
+                    latency_ms = round((end_dt - start_dt).total_seconds() * 1000, 2)
+                except Exception:
+                    latency_ms = None
+
+            spans = item.get("spans") or []
+            trace_id = item.get("trace_id") or ""
+            spans_for_ui = enriched_spans_by_trace.get(trace_id) or spans
+
+            status = "success"
+            if any((s.get("status_code") or "").upper() == "ERROR" for s in spans_for_ui):
+                status = "error"
+
+            root = None
+            for s in spans_for_ui:
+                if s.get("parent_id") in (None, "", "null"):
+                    root = s
+                    break
+            name = (root or {}).get("name") or "trace"
+
+            traces.append({
+                "id": item.get("id") or item.get("trace_id") or "",
+                "name": name,
+                "run_type": "trace",
+                "status": status,
+                "error": None,
+                "start_time": start,
+                "latency_ms": latency_ms,
+                "url": f"{base}/projects/{project_q}/spans?traceId={trace_id}",
+                "role": None,
+                "query": None,
+                "answer": None,
+                "governed": None,
+                "summary": _trace_summary_from_spans(spans_for_ui),
+            })
+
+        return {
+            "enabled": True,
+            "provider": "phoenix",
+            "project": project,
+            "ui_url": base,
+            "traces": traces,
+        }
+    except Exception as exc:
+        return {
+            "enabled": True,
+            "provider": "phoenix",
+            "project": project,
+            "ui_url": base,
+            "traces": [],
+            "error": f"Phoenix API failed: {type(exc).__name__}: {exc}",
+        }
 
 
 ROOT = Path(__file__).parent
@@ -1278,6 +1518,16 @@ class Handler(BaseHTTPRequestHandler):
                 limit = 25
             limit = max(1, min(limit, 100))
             return self._send(200, list_recent_traces(limit))
+        if self.path == "/phoenix_traces" or self.path.startswith("/phoenix_traces?"):
+            qs = parse_qs(urlparse(self.path).query)
+            try:
+                limit = int(qs.get("limit", ["25"])[0])
+            except ValueError:
+                limit = 25
+            project = (qs.get("project", ["default"])[0] or "default").strip()
+            return self._send(200, list_phoenix_traces(limit=limit, project=project))
+        if self.path == "/trace_target":
+            return self._send(200, trace_target_info())
         if self.path == "/report.pdf":
             pdf = STATE.report_pdf()
             self.send_response(200)
