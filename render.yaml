@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: aagcp-vector-pro
+    name: aagcp-api
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
@@ -8,6 +8,26 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.9"
+      - key: AAGCP_OTEL
+        value: "1"
+      # Set in Render dashboard after Phoenix service URL is known:
+      # https://aagcp-phoenix.onrender.com/v1/traces
+      - key: OTEL_EXPORTER_OTLP_ENDPOINT
+        sync: false
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: PINECONE_INDEX
+        sync: false
       # Optional: set this to use OpenAI API embeddings (no torch, low memory)
       # - key: OPENAI_API_KEY
       #   sync: false
+
+  - type: web
+    name: aagcp-phoenix
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python run_phoenix_forever.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"

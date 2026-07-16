@@ -116,6 +116,15 @@ class _Span:
         self.end = time.time()
         self.error = str(exc) if exc else None
         self.collector._pop(self)
+        # Mirror to OpenTelemetry (Phoenix/Langfuse/any OTEL backend) — no-op
+        # unless OTEL is installed & configured. Governance spans thus land in
+        # both the in-UI trace view and the observability backend at once.
+        try:
+            from aagcp.govern.telemetry import emit_otel
+            emit_otel(self.name, self.attrs,
+                      round((self.end - self.start) * 1000, 2), self.error)
+        except Exception:
+            pass
         return False
 
     def to_dict(self) -> dict:
@@ -999,13 +1008,47 @@ class Engine:
         logger.info(f"[QUERY] Starting query with role={role}")
         TRACE.start()
         try:
-            with TRACE.span("query", role=role, query=query_text[:80]):
+            with TRACE.span("query", role=role, query=query_text[:80]) as root:
                 admin_roles = ("COMPLIANCE_OFFICER", "ADMIN", "DATA_STEWARD")
                 is_admin = role in admin_roles
                 is_finance = role == "FINANCE"
                 reveal = {"ALL"} if is_admin else set()
                 partial = {} if is_admin or is_finance else ANALYST_PARTIAL
                 gov = self.last_report is not None and getattr(self, "_cleaned", False)
+
+                # --- GOVERNANCE: prompt-injection scan wired into the reveal
+                # decision. A risky query has its reveal downgraded or blocked,
+                # and that decision is traced (op=injection_scan).
+                from aagcp.govern import prompt_guard
+                verdict = prompt_guard.scan(query_text)
+                with TRACE.span("injection_scan", op="injection_scan",
+                                injection_risk=verdict.risk, decision=verdict.decision,
+                                signals=verdict.signals):
+                    pass
+                if verdict.decision == "block":
+                    root.attrs["decision"] = "block"
+                    return {"role": role, "governed": gov, "query": query_text,
+                            "answer": "Request blocked: the query was flagged as a "
+                                      "prompt-injection / exfiltration attempt.",
+                            "answer_source": "governance_block", "llm_model": None,
+                            "injection": verdict.to_attrs(),
+                            "trace": _current_trace_info(), "spans": TRACE.collect(),
+                            "results": []}
+                if verdict.decision == "downgrade":
+                    # force lowest-privilege reveal regardless of caller role
+                    reveal, partial = set(), ANALYST_PARTIAL
+                    root.attrs["decision"] = "downgrade_reveal"
+
+                # --- GOVERNANCE: role transition. If the effective role differs
+                # from the caller's last role this session, trace it — over-
+                # privileged access is the #1 real-world PII breach vector.
+                prev = getattr(self, "_last_role", None)
+                if prev and prev != role:
+                    with TRACE.span("role_transition", op="role_transition",
+                                    from_role=prev, to_role=role,
+                                    escalation=role in admin_roles and prev not in admin_roles):
+                        pass
+                self._last_role = role
                 logger.info(f"[QUERY] Role reveal={reveal}, governed={gov}, has_report={self.last_report is not None}")
 
                 with TRACE.span("setup_retriever", embedder=self.embedder.name, governed=gov):
@@ -1029,7 +1072,19 @@ class Engine:
                     search_span.attrs["hits"] = len(hits)
                 logger.info(f"[QUERY] Retrieved {len(hits)} results")
 
-                with TRACE.span("governance_filter", role=role, governed=gov):
+                # withhold reason for this role, for the audit trail
+                if role == "ANALYST_ROLE":
+                    _reveal_mode, _reason = "tokens_only", "policy:analyst_no_reveal"
+                elif is_finance:
+                    _reveal_mode, _reason = "partial", "policy:finance_partial"
+                elif is_admin:
+                    _reveal_mode, _reason = "full", "policy:privileged_role"
+                else:
+                    _reveal_mode, _reason = "partial", "policy:default_partial"
+                with TRACE.span("governance_filter", op="rehydrate", role=role,
+                                governed=gov, reveal_mode=_reveal_mode,
+                                withheld_reason=_reason,
+                                downgraded=(root.attrs.get("decision") == "downgrade_reveal")):
                     results = []
                     for h in hits:
                         if role == "ANALYST_ROLE":
@@ -1076,8 +1131,21 @@ class Engine:
             
             logger.info(f"[CLEAN] Cleaning {self.last_report.total_vectors} vectors")
             pii_before = self.last_report.summary()["total_pii_instances"]
-            m = Migrator(self.detector, self.vault, self.embedder)
-            rep = m.clean(self.store, self.last_report)
+            _summ = self.last_report.summary()
+            TRACE.start()
+            with TRACE.span("clean_request", op="reembed"):
+                with TRACE.span("pii_detect", op="detect",
+                                pii_types=list(_summ.get("by_type", {}).keys()),
+                                jurisdictions=list(_summ.get("by_jurisdiction", {}).keys()),
+                                pii_instances=pii_before,
+                                detector=self.detector.coverage().get("ner_backend", "regex")):
+                    pass
+                m = Migrator(self.detector, self.vault, self.embedder)
+                with TRACE.span("pii_mask_reembed", op="reembed") as _ms:
+                    rep = m.clean(self.store, self.last_report)
+                    _ms.attrs["reembedded"] = rep.summary().get("reembedded", 0)
+                    _ms.attrs["quarantined"] = rep.summary().get("quarantined", 0)
+            _clean_spans = TRACE.collect()
             if self.vault.path:
                 self.vault.save()
             self._cleaned = True
@@ -1089,7 +1157,8 @@ class Engine:
             pii_after = after.summary()["total_pii_instances"]
             logger.info(f"[CLEAN] Complete - PII before: {pii_before}, after: {pii_after}")
             
-            return {**rep.summary(), "pii_before": pii_before, "pii_after": pii_after}
+            return {**rep.summary(), "pii_before": pii_before, "pii_after": pii_after,
+                    "spans": _clean_spans}
         except Exception as e:
             logger.error(f"[CLEAN] Error: {type(e).__name__}: {e}")
             raise
@@ -1118,7 +1187,18 @@ class Engine:
                         "message": f"'{subject}' matches {len(iids)} subjects — specify an identifier."}
             
             logger.info(f"[ERASE] Shredding identity {iids[0]}...")
-            res = self.vault.crypto_shred_identity(iids[0])
+            TRACE.start()
+            with TRACE.span("erase_request", op="erase", subject=subject):
+                with TRACE.span("resolve_identity", identities=len(iids)):
+                    pass
+                res = self.vault.crypto_shred_identity(iids[0])
+                with TRACE.span("crypto_shred", op="erase", subject=subject,
+                                tokens_destroyed=len(res["tokens_destroyed"]),
+                                tokens_retained=len(res["tokens_retained_shared"]),
+                                method="reference_counted_crypto_shred",
+                                article="GDPR Art.17 / DPDP Art.12"):
+                    pass
+            _erase_spans = TRACE.collect()
             logger.info(f"[ERASE] Complete - {len(res['tokens_destroyed'])} tokens destroyed, "
                        f"{len(res['tokens_retained_shared'])} retained")
             if self.vault.path:
@@ -1127,6 +1207,7 @@ class Engine:
             return {"executed": True, "subject": subject,
                     "tokens_destroyed": len(res["tokens_destroyed"]),
                     "tokens_retained_shared": len(res["tokens_retained_shared"]),
+                    "spans": _erase_spans,
                     "vectors_reembedded": 0, "vectors_deleted": 0,
                     "message": f"Erased '{subject}': {len(res['tokens_destroyed'])} tokens destroyed, "
                                f"{len(res['tokens_retained_shared'])} retained (shared)."}
@@ -1246,6 +1327,11 @@ if __name__ == "__main__":
     logger.info(f"PII Coverage: {STATE.detector.coverage()}")
     logger.info(f"Pinecone Index: {os.getenv('PINECONE_INDEX')}")
     logger.info(f"Vectors in index: {STATE.store.count()}")
+    try:
+        from aagcp.govern.telemetry import add_phoenix
+        logger.info(f"[OTEL] {add_phoenix()}")
+    except Exception as e:
+        logger.warning(f"[OTEL] Phoenix setup skipped: {type(e).__name__}: {e}")
     logger.info(f"Log file: aagcp_server.log")
     logger.info(f"="*80)
     print(f"\n✓ AAGCP-Vector PRO on :{port}  (embedder={STATE.embedder.name})")
