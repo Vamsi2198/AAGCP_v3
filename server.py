@@ -32,6 +32,7 @@ import importlib
 import itertools
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, urlsplit, urlunsplit, quote
@@ -962,6 +963,8 @@ class Engine:
         self.last_report = None
         self.last_uploaded_ids: list[str] = []
         self.last_uploaded_pdf_filename: str | None = None
+        self._upload_jobs: dict[str, dict] = {}
+        self._upload_jobs_lock = threading.Lock()
 
     @workflow(name="connect_index")
     def reset(self, seed: int = 1) -> dict:
@@ -1134,6 +1137,57 @@ class Engine:
 
     @workflow(name="upload_pdf", process_inputs=_drop_pdf_bytes)
     def upload_pdf(self, filename: str, content_b64: str) -> dict:
+        # Large PDF ingestion can exceed PaaS request timeouts. Start a
+        # background job and let the client poll for completion.
+        job_id = uuid.uuid4().hex
+        with self._upload_jobs_lock:
+            self._upload_jobs[job_id] = {
+                "status": "running",
+                "filename": filename,
+                "created_at": datetime.utcnow().isoformat() + "Z",
+            }
+
+        worker = threading.Thread(
+            target=self._upload_pdf_job_worker,
+            args=(job_id, filename, content_b64),
+            daemon=True,
+        )
+        worker.start()
+        return {
+            "accepted": True,
+            "job_id": job_id,
+            "status": "running",
+            "message": f"Upload started for {filename}. Poll /upload_status?job_id={job_id}",
+        }
+
+    def upload_status(self, job_id: str) -> dict:
+        with self._upload_jobs_lock:
+            job = self._upload_jobs.get(job_id)
+            if not job:
+                return {"found": False, "status": "not_found", "job_id": job_id}
+            return {"found": True, "job_id": job_id, **job}
+
+    def _upload_pdf_job_worker(self, job_id: str, filename: str, content_b64: str):
+        try:
+            result = self._upload_pdf_impl(filename, content_b64)
+            with self._upload_jobs_lock:
+                self._upload_jobs[job_id] = {
+                    "status": "done",
+                    "filename": filename,
+                    "finished_at": datetime.utcnow().isoformat() + "Z",
+                    "result": result,
+                }
+        except Exception as exc:
+            logger.error(f"[UPLOAD_JOB] job={job_id} failed: {type(exc).__name__}: {exc}", exc_info=True)
+            with self._upload_jobs_lock:
+                self._upload_jobs[job_id] = {
+                    "status": "error",
+                    "filename": filename,
+                    "finished_at": datetime.utcnow().isoformat() + "Z",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+
+    def _upload_pdf_impl(self, filename: str, content_b64: str) -> dict:
         logger.info(f"[UPLOAD] Ingesting PDF file: {filename}")
         try:
             data = base64.b64decode(content_b64)
@@ -1503,6 +1557,12 @@ class Handler(BaseHTTPRequestHandler):
                 limit = 25
             limit = max(1, min(limit, 100))
             return self._send(200, list_recent_traces(limit))
+        if self.path == "/upload_status" or self.path.startswith("/upload_status?"):
+            qs = parse_qs(urlparse(self.path).query)
+            job_id = (qs.get("job_id", [""])[0] or "").strip()
+            if not job_id:
+                return self._send(400, {"error": "job_id is required"})
+            return self._send(200, STATE.upload_status(job_id))
         if self.path == "/phoenix_traces" or self.path.startswith("/phoenix_traces?"):
             qs = parse_qs(urlparse(self.path).query)
             try:

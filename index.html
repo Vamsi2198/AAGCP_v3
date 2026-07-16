@@ -415,6 +415,17 @@ async function scanLastPdf(){V("Scanning only the most recently uploaded PDF…"
 
 let selectedPdfDataUrl = "";
 
+async function waitForUploadJob(jobId, maxAttempts = 180){
+  for(let i=0;i<maxAttempts;i++){
+    const st = await getJSON(`/upload_status?job_id=${encodeURIComponent(jobId)}`);
+    if(st.error) return st;
+    if(st.status === "done") return st.result || {message:"Upload completed."};
+    if(st.status === "error") return {error: st.error || "Upload job failed"};
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+  return {error:"Upload is still processing. Please try scan in a minute."};
+}
+
 async function uploadPdf(){
   const file = $("pdfFile").files?.[0];
   if(!file){V("Pick a PDF file to upload","warn");return;}
@@ -425,9 +436,17 @@ async function uploadPdf(){
     selectedPdfDataUrl = dataUrl;
     $("previewPdfBtn").disabled = false;
     const b64 = dataUrl.split(",",2)[1] || "";
-    const res = await call("/upload_pdf","POST",{filename:file.name,content:b64});
-    if(res.error){V(`Upload failed: ${res.error}`,'warn');return;}
-    V(`${res.message} (${res.pdf_chunks||res.uploaded} chunks)`,'ok');
+    const start = await call("/upload_pdf","POST",{filename:file.name,content:b64});
+    if(start.error){V(`Upload failed: ${start.error}`,'warn');return;}
+
+    let res = start;
+    if(start.accepted && start.job_id){
+      V(`Upload queued. Processing ${file.name}...`);
+      res = await waitForUploadJob(start.job_id);
+      if(res.error){V(`Upload failed: ${res.error}`,'warn');return;}
+    }
+
+    V(`${res.message} (${res.pdf_chunks||res.uploaded||0} chunks)`,'ok');
     $("pdfName").textContent = file.name;
     loadTraces();
   };
