@@ -1,19 +1,13 @@
 import os
-import time
+import subprocess
+import sys
 
-import phoenix as px
-
-port = int(os.getenv("PORT", os.getenv("PHOENIX_PORT", "7007")))
+port = os.getenv("PORT", os.getenv("PHOENIX_PORT", "6006"))
 host = os.getenv("PHOENIX_HOST", "0.0.0.0")
 
-# Render provides PORT; bind Phoenix explicitly so it can route traffic.
-try:
-    px.launch_app(host=host, port=port)
-except TypeError:
-    # Compatibility fallback for older Phoenix versions.
-    px.launch_app(port=port)
+# Render requires binding to its assigned PORT.
+os.environ["PHOENIX_PORT"] = str(port)
+os.environ["PHOENIX_HOST"] = host
 
-print(f"Phoenix ready on http://{host}:{port}")
-
-while True:
-    time.sleep(3600)
+print(f"Starting Phoenix server on http://{host}:{port}")
+subprocess.run([sys.executable, "-m", "phoenix.server.main", "serve"], check=True)

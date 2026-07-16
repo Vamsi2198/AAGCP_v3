@@ -27,7 +27,7 @@ services:
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python run_phoenix_forever.py
+    startCommand: phoenix serve
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.9"
