@@ -429,6 +429,47 @@ async function waitForUploadJob(jobId, maxAttempts = 180){
   return {error:"Upload is still processing. Please try scan in a minute."};
 }
 
+function bytesToBase64(bytes){
+  let bin = "";
+  const block = 0x8000;
+  for(let i=0;i<bytes.length;i+=block){
+    const part = bytes.subarray(i, i + block);
+    bin += String.fromCharCode.apply(null, part);
+  }
+  return btoa(bin);
+}
+
+async function uploadPdfChunked(file){
+  const start = await call("/upload_pdf_start","POST",{filename:file.name,size:file.size});
+  if(start.error) return {error:start.error};
+  if(!start.upload_id) return {error:"Upload session was not created"};
+
+  const uploadId = start.upload_id;
+  const chunkSize = Math.max(64 * 1024, Number(start.chunk_bytes || 768 * 1024));
+  let offset = 0;
+  let part = 0;
+
+  while(offset < file.size){
+    const end = Math.min(file.size, offset + chunkSize);
+    const slice = file.slice(offset, end);
+    const bytes = new Uint8Array(await slice.arrayBuffer());
+    const b64 = bytesToBase64(bytes);
+
+    const step = await call("/upload_pdf_chunk","POST",{upload_id: uploadId, chunk: b64});
+    if(step.error || step.accepted === false){
+      await call("/upload_pdf_abort","POST",{upload_id: uploadId});
+      return {error: step.error || step.message || "Chunk upload failed"};
+    }
+
+    part += 1;
+    offset = end;
+    const pct = Math.max(1, Math.round((offset / file.size) * 100));
+    V(`Uploading ${file.name}: ${pct}% (${part} chunks sent)`);
+  }
+
+  return await call("/upload_pdf_finish","POST",{upload_id: uploadId});
+}
+
 async function uploadPdf(){
   const file = $("pdfFile").files?.[0];
   if(!file){V("Pick a PDF file to upload","warn");return;}
@@ -438,8 +479,7 @@ async function uploadPdf(){
     const dataUrl = reader.result || "";
     selectedPdfDataUrl = dataUrl;
     $("previewPdfBtn").disabled = false;
-    const b64 = dataUrl.split(",",2)[1] || "";
-    const start = await call("/upload_pdf","POST",{filename:file.name,content:b64});
+    const start = await uploadPdfChunked(file);
     if(start.error){V(`Upload failed: ${start.error}`,'warn');return;}
 
     let res = start;

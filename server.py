@@ -1009,12 +1009,127 @@ class Engine:
         self.last_uploaded_pdf_filename: str | None = None
         self._upload_jobs: dict[str, dict] = {}
         self._upload_jobs_lock = threading.Lock()
+        self._upload_sessions: dict[str, dict] = {}
+        self._upload_sessions_lock = threading.Lock()
 
     def _set_upload_job(self, job_id: str, **fields):
         with self._upload_jobs_lock:
             cur = self._upload_jobs.get(job_id, {})
             cur.update(fields)
             self._upload_jobs[job_id] = cur
+
+    def upload_start(self, filename: str, total_size: int | None = None) -> dict:
+        upload_id = uuid.uuid4().hex
+        chunk_bytes = max(64 * 1024, int(os.getenv("AAGCP_UPLOAD_CHUNK_BYTES", str(768 * 1024))))
+        max_upload_bytes = max(chunk_bytes, int(os.getenv("AAGCP_MAX_UPLOAD_BYTES", str(80 * 1024 * 1024))))
+        tmp_path = str(self._tmp / f"upload_{upload_id}.pdf")
+
+        with self._upload_sessions_lock:
+            self._upload_sessions[upload_id] = {
+                "filename": filename,
+                "path": tmp_path,
+                "bytes_received": 0,
+                "chunks_received": 0,
+                "max_upload_bytes": max_upload_bytes,
+                "total_size": int(total_size) if isinstance(total_size, int) and total_size >= 0 else None,
+                "created_at": datetime.utcnow().isoformat() + "Z",
+            }
+
+        logger.info(
+            f"[UPLOAD_SESSION] started upload_id={upload_id} filename={filename} "
+            f"chunk_bytes={chunk_bytes} max_upload_bytes={max_upload_bytes}"
+        )
+        return {
+            "accepted": True,
+            "upload_id": upload_id,
+            "chunk_bytes": chunk_bytes,
+            "max_upload_bytes": max_upload_bytes,
+        }
+
+    def upload_chunk(self, upload_id: str, chunk_b64: str) -> dict:
+        with self._upload_sessions_lock:
+            session = self._upload_sessions.get(upload_id)
+        if not session:
+            return {"accepted": False, "error": "upload session not found", "upload_id": upload_id}
+
+        try:
+            chunk = base64.b64decode(chunk_b64)
+        except Exception:
+            return {"accepted": False, "error": "invalid base64 chunk", "upload_id": upload_id}
+
+        if not chunk:
+            return {"accepted": False, "error": "empty upload chunk", "upload_id": upload_id}
+
+        next_total = int(session.get("bytes_received", 0)) + len(chunk)
+        max_upload_bytes = int(session.get("max_upload_bytes", 0))
+        if next_total > max_upload_bytes:
+            self.upload_abort(upload_id)
+            return {
+                "accepted": False,
+                "error": f"upload exceeds max bytes ({max_upload_bytes})",
+                "upload_id": upload_id,
+            }
+
+        path = session.get("path")
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "ab") as f:
+            f.write(chunk)
+
+        with self._upload_sessions_lock:
+            cur = self._upload_sessions.get(upload_id)
+            if not cur:
+                return {"accepted": False, "error": "upload session not found", "upload_id": upload_id}
+            cur["bytes_received"] = int(cur.get("bytes_received", 0)) + len(chunk)
+            cur["chunks_received"] = int(cur.get("chunks_received", 0)) + 1
+            self._upload_sessions[upload_id] = cur
+            return {
+                "accepted": True,
+                "upload_id": upload_id,
+                "bytes_received": cur["bytes_received"],
+                "chunks_received": cur["chunks_received"],
+            }
+
+    def upload_finish(self, upload_id: str) -> dict:
+        with self._upload_sessions_lock:
+            session = self._upload_sessions.pop(upload_id, None)
+        if not session:
+            return {"accepted": False, "error": "upload session not found", "upload_id": upload_id}
+
+        path = session.get("path")
+        filename = session.get("filename") or "uploaded.pdf"
+        try:
+            data = Path(path).read_bytes()
+        except Exception as exc:
+            return {"accepted": False, "error": f"could not read staged upload: {type(exc).__name__}: {exc}"}
+        finally:
+            try:
+                if path and Path(path).exists():
+                    Path(path).unlink()
+            except Exception:
+                pass
+
+        if not data:
+            return {"accepted": False, "error": "staged upload is empty", "upload_id": upload_id}
+
+        logger.info(
+            f"[UPLOAD_SESSION] finishing upload_id={upload_id} filename={filename} bytes={len(data)}"
+        )
+        content_b64 = base64.b64encode(data).decode("ascii")
+        return self.upload_pdf(filename, content_b64)
+
+    def upload_abort(self, upload_id: str) -> dict:
+        with self._upload_sessions_lock:
+            session = self._upload_sessions.pop(upload_id, None)
+        if not session:
+            return {"accepted": True, "upload_id": upload_id}
+
+        path = session.get("path")
+        try:
+            if path and Path(path).exists():
+                Path(path).unlink()
+        except Exception:
+            pass
+        return {"accepted": True, "upload_id": upload_id}
 
     @workflow(name="connect_index")
     def reset(self, seed: int = 1) -> dict:
@@ -1746,6 +1861,30 @@ class Handler(BaseHTTPRequestHandler):
                 content = b.get("content", "")
                 logger.info(f"[HTTP] /upload_pdf endpoint (filename={filename})")
                 return self._send(200, STATE.upload_pdf(filename, content))
+            if self.path == "/upload_pdf_start":
+                filename = b.get("filename", "uploaded.pdf")
+                total_size = b.get("size")
+                logger.info(f"[HTTP] /upload_pdf_start endpoint (filename={filename})")
+                return self._send(200, STATE.upload_start(filename, total_size if isinstance(total_size, int) else None))
+            if self.path == "/upload_pdf_chunk":
+                upload_id = (b.get("upload_id") or "").strip()
+                chunk = b.get("chunk", "")
+                if not upload_id:
+                    return self._send(400, {"error": "upload_id is required"})
+                if not chunk:
+                    return self._send(400, {"error": "chunk is required"})
+                return self._send(200, STATE.upload_chunk(upload_id, chunk))
+            if self.path == "/upload_pdf_finish":
+                upload_id = (b.get("upload_id") or "").strip()
+                if not upload_id:
+                    return self._send(400, {"error": "upload_id is required"})
+                logger.info(f"[HTTP] /upload_pdf_finish endpoint (upload_id={upload_id})")
+                return self._send(200, STATE.upload_finish(upload_id))
+            if self.path == "/upload_pdf_abort":
+                upload_id = (b.get("upload_id") or "").strip()
+                if not upload_id:
+                    return self._send(400, {"error": "upload_id is required"})
+                return self._send(200, STATE.upload_abort(upload_id))
             if self.path == "/wipe":
                 logger.info("[HTTP] /wipe endpoint")
                 return self._send(200, STATE.wipe_all())
