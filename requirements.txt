@@ -10,7 +10,7 @@
     arize-phoenix
     opentelemetry-exporter-otlp
     # Tracing — only used if LANGSMITH_API_KEY is set:
-    langsmith
+    # langsmith
     # Production backends (install only what you connect to):
     # presidio-analyzer   presidio-anonymizer   # global NER (names/addresses)
     # sentence-transformers                      # local embeddings (needs more RAM)
