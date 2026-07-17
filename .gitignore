@@ -12,3 +12,4 @@ __pycache__/
 .idea/
 *.log
 .env
+.aagcp_vault_state.json

@@ -1,6 +1,7 @@
 """Deterministic pseudonym vault with reference-counted crypto-shred."""
 from __future__ import annotations
 import hmac, hashlib, json, secrets, re, logging
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 from .detect.detector import Finding
@@ -177,9 +178,50 @@ class PseudonymVault:
             "shredded": self._shredded}, indent=2))
 
     def _load(self):
-        d = json.loads(self.path.read_text())
-        self._store = {k: {**v, "identities": set(v.get("identities", []))}
-                       for k, v in d.get("store", {}).items()}
-        self._identities = {k: set(v) for k, v in d.get("identities", {}).items()}
-        self._idnames = {k: set(v) for k, v in d.get("idnames", {}).items()}
-        self._shredded = d.get("shredded", [])
+        try:
+            raw = self.path.read_text()
+        except Exception as exc:
+            logger.warning(
+                f"[VAULT] Could not read vault state file '{self.path}': {type(exc).__name__}: {exc}. "
+                "Starting with empty vault state."
+            )
+            return
+
+        if not raw.strip():
+            logger.warning(
+                f"[VAULT] Vault state file '{self.path}' is empty. "
+                "Starting with empty vault state."
+            )
+            return
+
+        try:
+            d = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            backup = self.path.with_name(
+                f"{self.path.name}.corrupt.{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+            )
+            try:
+                self.path.rename(backup)
+                logger.warning(
+                    f"[VAULT] Invalid vault JSON in '{self.path}' ({type(exc).__name__}: {exc}). "
+                    f"Moved to '{backup.name}' and starting with empty vault state."
+                )
+            except Exception:
+                logger.warning(
+                    f"[VAULT] Invalid vault JSON in '{self.path}' ({type(exc).__name__}: {exc}). "
+                    "Starting with empty vault state."
+                )
+            return
+
+        self._store = {
+            k: {**v, "identities": set(v.get("identities", []))}
+            for k, v in (d.get("store", {}) if isinstance(d, dict) else {}).items()
+        }
+        self._identities = {
+            k: set(v) for k, v in (d.get("identities", {}) if isinstance(d, dict) else {}).items()
+        }
+        self._idnames = {
+            k: set(v) for k, v in (d.get("idnames", {}) if isinstance(d, dict) else {}).items()
+        }
+        shredded = d.get("shredded", []) if isinstance(d, dict) else []
+        self._shredded = shredded if isinstance(shredded, list) else []
