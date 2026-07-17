@@ -307,23 +307,27 @@ def _coalesce_chunks(chunks: list[dict], max_chunks: int, page_num: int, strateg
 
 def chunk_page(page, doc_name: str, page_num: int):
     max_chunks_per_page = max(1, int(os.getenv("AAGCP_MAX_CHUNKS_PER_PAGE", "10")))
+    coalesce_enabled = _env_flag("AAGCP_COALESCE_UPLOAD_CHUNKS", False)
     text = page.extract_text() or ""
     if looks_like_json_lines(text):
         chunks = chunk_json_lines(text, doc_name, page_num)
         if chunks:
-            chunks = _coalesce_chunks(chunks, max_chunks_per_page, page_num, "JSON-lines strategy")
+            if coalesce_enabled:
+                chunks = _coalesce_chunks(chunks, max_chunks_per_page, page_num, "JSON-lines strategy")
             logger.info(f"[CHUNKING] Page {page_num}: JSON-lines strategy -> {len(chunks)} chunks")
             return chunks
 
     chunks = chunk_by_header_pattern(text, doc_name, page_num)
     if chunks:
-        chunks = _coalesce_chunks(chunks, max_chunks_per_page, page_num, "Header-marker strategy")
+        if coalesce_enabled:
+            chunks = _coalesce_chunks(chunks, max_chunks_per_page, page_num, "Header-marker strategy")
         logger.info(f"[CHUNKING] Page {page_num}: Header-marker strategy -> {len(chunks)} chunks")
         return chunks
 
     chunks = chunk_table_rows(page, doc_name, page_num)
     if chunks:
-        chunks = _coalesce_chunks(chunks, max_chunks_per_page, page_num, "Table-row strategy")
+        if coalesce_enabled:
+            chunks = _coalesce_chunks(chunks, max_chunks_per_page, page_num, "Table-row strategy")
         logger.info(f"[CHUNKING] Page {page_num}: Table-row strategy -> {len(chunks)} chunks")
         return chunks
 

@@ -21,8 +21,45 @@ from collections import Counter
 from ..embed.embedders import EmbedderAdapter
 from ..store.connectors import VectorStoreConnector
 from ..vault import PseudonymVault
+from ..detect.patterns import GLOBAL_PATTERNS
 
 logger = logging.getLogger(__name__)
+
+
+# Reuse detector regex definitions to keep query-time snippet extraction
+# aligned with scanning/tokenization rules.
+_IDENTIFIER_SNIPPET_ENTITY_TYPES = {
+    "AADHAAR",
+    "PAN",
+    "IN_VOTER_ID",
+    "IN_PASSPORT",
+    "IN_DRIVING_LICENCE",
+    "IN_PHONE",
+    "IN_GSTIN",
+    "US_SSN",
+    "US_EIN",
+    "US_NPI",
+    "US_MEDICARE",
+    "US_PHONE",
+    "UK_NHS",
+    "UK_NINO",
+    "EU_VAT",
+    "IBAN",
+    "SWIFT_BIC",
+    "CREDIT_CARD",
+    "MRN",
+    "NCT_TRIAL",
+    "EMAIL",
+    "INTL_PHONE",
+    "IPV4",
+    "IPV6",
+}
+
+_IDENTIFIER_SNIPPET_PATTERNS = {
+    p.entity_type: p.regex
+    for p in GLOBAL_PATTERNS
+    if p.entity_type in _IDENTIFIER_SNIPPET_ENTITY_TYPES
+}
 
 
 def _toks(s: str) -> List[str]:
@@ -105,14 +142,7 @@ def _extract_identifier_snippets(text: str) -> dict[str, set[str]]:
     s = text or ""
     out: dict[str, set[str]] = {}
 
-    patterns = {
-        "AADHAAR": re.compile(r"\b\d{4}\s?\d{4}\s?\d{4}\b"),
-        "PAN": re.compile(r"\b[A-Z]{5}\d{4}[A-Z]\b", re.I),
-        "MRN": re.compile(r"\bMRN[-:\s]?\d{5,10}\b", re.I),
-        "EMAIL": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
-    }
-
-    for etype, pat in patterns.items():
+    for etype, pat in _IDENTIFIER_SNIPPET_PATTERNS.items():
         vals = {m.group(0).strip() for m in pat.finditer(s)}
         if vals:
             out[etype] = vals
@@ -134,7 +164,22 @@ def _dedupe_preserve_order(items: List[str]) -> List[str]:
 def _token_prefixes_for_identifier_type(etype: str) -> tuple[str, ...]:
     if etype == "EMAIL":
         return ("<EMAIL_", "<EMAIL_ADDRESS_")
+    if etype in {"US_PHONE", "IN_PHONE", "INTL_PHONE"}:
+        return (f"<{etype}_", "<PHONE_")
     return (f"<{etype}_",)
+
+
+def _should_require_identity_anchor(
+    text: str,
+    matched_tokens: set[str],
+    identifier_snippets: dict[str, set[str]],
+) -> bool:
+    """Use strict identity anchoring for high-signal person/identifier queries."""
+    if not matched_tokens:
+        return False
+    if identifier_snippets:
+        return True
+    return _looks_like_person_name_query(text)
 
 
 
@@ -230,6 +275,25 @@ class GovernedRetriever:
         qvec = self.embedder.embed(q)
         fetch_k = max(candidate_k, k)
         hits = self.store.query(qvec, k=fetch_k)
+
+        # For identity-specific queries, keep only candidates that actually
+        # contain the matched vault tokens to avoid template-similar false hits.
+        if hits and _should_require_identity_anchor(text, matched_tokens, identifier_snippets):
+            anchored_hits = [
+                h for h in hits
+                if _contains_any_token(h.get("source_text") or "", matched_tokens)
+            ]
+            if anchored_hits:
+                logger.info(
+                    "[RETRIEVER] Identity anchor enabled; filtered candidates "
+                    f"{len(hits)} -> {len(anchored_hits)}"
+                )
+                hits = anchored_hits
+            else:
+                logger.warning(
+                    "[RETRIEVER] Identity anchor enabled, but no candidate contained matched tokens; "
+                    "falling back to unfiltered candidates."
+                )
 
         if hybrid and hits:
             q_tokens = _toks(q)
